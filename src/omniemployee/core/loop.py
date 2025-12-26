@@ -4,11 +4,30 @@ import json
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Any
 from enum import Enum
+from pathlib import Path
+
+from rich.console import Console
+from rich.text import Text
+from rich.style import Style
 
 from src.omniemployee.core.agent import Agent
 from src.omniemployee.llm import LLMProvider, LLMConfig, LLMResponse
 from src.omniemployee.context.message import ToolCall, MessageRole
 from src.omniemployee.tools.base import ToolResult, ToolResultStatus
+
+# Prompts directory
+PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
+
+# Rich console for output (force_terminal for color support in various environments)
+console = Console(force_terminal=True)
+
+
+def load_prompt(name: str) -> str:
+    """Load a prompt template from the prompts directory."""
+    prompt_path = PROMPTS_DIR / f"{name}.md"
+    if prompt_path.exists():
+        return prompt_path.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"Prompt template not found: {prompt_path}")
 
 
 class LoopState(Enum):
@@ -45,6 +64,10 @@ class LoopConfig:
     # Context compression settings
     compress_threshold: float = 0.7  # Trigger compression at 70% of context window
     llm_compress_enabled: bool = True  # Use LLM for summarization
+    
+    # Web search summarization settings
+    summarize_web_results: bool = True  # Summarize web_search/web_extract results
+    summarize_model: str = "qwen-turbo"  # Model for summarization
 
 
 @dataclass
@@ -116,11 +139,68 @@ class AgentLoop:
         if self.config.llm_compress_enabled:
             self.agent.context.set_llm_summarize_callback(self._summarize_conversation)
         
+        # Initialize summarization LLM (qwen-turbo for web results)
+        self._summarize_llm: LLMProvider | None = None
+        if self.config.summarize_web_results:
+            self._init_summarize_llm()
+        
         # State tracking
         self.state = LoopState.IDLE
         self._iteration = 0
         self._tool_calls_count = 0
         self._total_tokens = 0
+    
+    def _init_summarize_llm(self) -> None:
+        """Initialize the LLM for web search summarization."""
+        summarize_config = LLMConfig(
+            model=self.config.summarize_model,
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        self._summarize_llm = LLMProvider(summarize_config)
+    
+    def _print_context_status(self) -> str:
+        """Print context usage status to terminal."""
+        stats = self.agent.context.get_context_stats()
+        usage_percent = stats.get("usage_percent", 0)
+        current_tokens = stats.get("current_tokens", 0)
+        max_tokens = stats.get("max_tokens", 0)
+        
+        text = Text()
+        text.append("Context: ", style="dim")
+        text.append(f"({current_tokens:,}/{max_tokens:,})", style="white")
+        text.append(f" {usage_percent:.1f}%", style="bold cyan")
+        
+        console.print(text)
+        return f"Context: ({current_tokens:,}/{max_tokens:,}) {usage_percent:.1f}%"
+    
+    async def _summarize_web_result(self, content: str, search_intent: str) -> str:
+        """Summarize web search/extract result based on search intent."""
+        if not self._summarize_llm or not content:
+            return content
+        
+        # Skip if content is short enough
+        if len(content) < 1000:
+            return content
+        
+        try:
+            prompt_template = load_prompt("web_search_summary")
+            prompt = prompt_template.format(
+                search_intent=search_intent,
+                content=content[:15000]
+            )
+        except FileNotFoundError:
+            console.print("[yellow]⚠️ Prompt template not found, using fallback[/yellow]")
+            prompt = f"Summarize the following content based on search intent '{search_intent}':\n\n{content[:15000]}"
+        
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response = await self._summarize_llm.complete(messages)
+            summary = response.content or content
+            return f"[Summarized from {len(content)} chars]\n\n{summary}"
+        except Exception as e:
+            console.print(f"[yellow]⚠️ Summarization failed: {e}[/yellow]")
+            return content
     
     def _setup_context_window(self) -> None:
         """Auto-detect and configure context window from model."""
@@ -133,19 +213,12 @@ class AgentLoop:
     
     async def _summarize_conversation(self, conversation_text: str) -> str:
         """Summarize conversation using LLM."""
-        summary_prompt = f"""Please summarize the following conversation between a user and an AI assistant. 
-Focus on:
-1. Key topics discussed
-2. Important decisions or conclusions
-3. Any pending tasks or follow-ups
-4. Critical information that should be remembered
-
-Keep the summary concise but comprehensive (around 200-400 words).
-
-Conversation:
-{conversation_text}
-
-Summary:"""
+        try:
+            prompt_template = load_prompt("conversation_summary")
+            summary_prompt = prompt_template.format(conversation_text=conversation_text)
+        except FileNotFoundError:
+            console.print("[yellow]⚠️ Prompt template not found, using fallback[/yellow]")
+            summary_prompt = f"Summarize the following conversation:\n\n{conversation_text}"
         
         messages = [{"role": "user", "content": summary_prompt}]
         
@@ -173,6 +246,9 @@ Summary:"""
         
         while self._iteration < self.config.max_iterations:
             self._iteration += 1
+            
+            # Print context status before LLM call
+            self._print_context_status()
             
             # Check if context compression is needed
             if self.agent.context.needs_compression():
@@ -251,6 +327,9 @@ Summary:"""
         while self._iteration < self.config.max_iterations:
             self._iteration += 1
             
+            # Print context status before LLM call
+            self._print_context_status()
+            
             # Check if context compression is needed
             if self.agent.context.needs_compression():
                 yield "\n\n📦 **Compressing context...**\n"
@@ -307,18 +386,29 @@ Summary:"""
                         
                         result = await self._execute_single_tool(tool_name, tool_args)
                         
+                        # Get result content
+                        result_content = result.to_message()
+                        
+                        # Summarize web search/extract results
+                        if tool_name in ("web_search", "web_extract") and result.success and self.config.summarize_web_results:
+                            search_intent = tool_args.get("query", "") or tool_args.get("url", "")
+                            yield f"_Summarizing results for: {search_intent[:100]}..._\n"
+                            result_content = await self._summarize_web_result(result_content, search_intent)
+                        
                         self.agent.context.add_tool_result(
                             tool_call_id=tc["id"],
-                            content=result.to_message(),
+                            content=result_content,
                             is_error=not result.success
                         )
                         
-                        # Yield result
-                        result_preview = result.to_message()
+                        # Yield result preview
+                        result_preview = result_content
                         
                         # For run_command, the output already includes the command at the top
-                        # So we can show more of the output
                         max_preview = 500 if tool_name != "run_command" else 800
+                        if tool_name in ("web_search", "web_extract"):
+                            max_preview = 1500  # Show more for summarized web results
+                        
                         if len(result_preview) > max_preview:
                             result_preview = result_preview[:max_preview] + "..."
                         
@@ -455,9 +545,18 @@ Summary:"""
             
             result = await self._execute_single_tool(tc.name, tc.arguments)
             
+            # Get result content
+            result_content = result.to_message()
+            
+            # Summarize web search/extract results
+            if tc.name in ("web_search", "web_extract") and result.success and self.config.summarize_web_results:
+                search_intent = tc.arguments.get("query", "") or tc.arguments.get("url", "")
+                print(f"📝 Summarizing web results for: {search_intent[:100]}...")
+                result_content = await self._summarize_web_result(result_content, search_intent)
+            
             self.agent.context.add_tool_result(
                 tool_call_id=tc.id,
-                content=result.to_message(),
+                content=result_content,
                 is_error=not result.success
             )
     

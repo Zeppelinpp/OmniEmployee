@@ -100,6 +100,8 @@ Working directory: {self.workspace_root}
         from src.omniemployee.tools.read_file import ReadFileTool
         from src.omniemployee.tools.write_file import WriteFileTool
         from src.omniemployee.tools.run_command import RunCommandTool
+        from src.omniemployee.tools.web_search import WebSearchTool
+        from src.omniemployee.tools.web_extract import WebExtractTool
         
         workspace = str(self.workspace_root)
         
@@ -108,6 +110,8 @@ Working directory: {self.workspace_root}
         self.tools.register(ReadFileTool(workspace))
         self.tools.register(WriteFileTool(workspace))
         self.tools.register(RunCommandTool(workspace))
+        self.tools.register(WebSearchTool())
+        self.tools.register(WebExtractTool())
     
     def discover_skills(self) -> None:
         """Discover available skills and register metadata."""

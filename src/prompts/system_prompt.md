@@ -15,6 +15,7 @@ At each step, follow this reasoning process:
 - Check the list of available skills below
 - Determine if any skill matches the current task requirements
 - If a skill seems relevant but you haven't loaded it yet, load it to get detailed instructions
+- **If the topic has changed**, unload skills that are no longer relevant before loading new ones
 
 ### 3. Plan Next Action
 - Based on context analysis and available capabilities, decide the next step
@@ -48,6 +49,15 @@ Skills follow a **progressive disclosure** pattern:
 - The main skill instructions mention a reference file
 - You need detailed examples, schemas, or templates
 - The task requires variant-specific information (e.g., different frameworks, platforms)
+
+### When to Unload a Skill
+**Important**: Actively manage loaded skills to keep context focused and efficient.
+- The user switches to a completely different topic unrelated to the loaded skill
+- The skill's task is fully completed and no follow-up is expected
+- You need to free up context space for new skills or information
+- The conversation has moved on and the skill hasn't been referenced in several exchanges
+
+**Best Practice**: Before loading a new skill for a different topic, unload skills that are no longer relevant. This keeps the context clean and improves response quality.
 
 ## Guidelines
 

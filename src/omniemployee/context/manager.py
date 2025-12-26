@@ -248,11 +248,15 @@ class ContextManager:
     
     def get_context_stats(self) -> dict:
         """Get statistics about current context."""
+        # Recalculate to ensure accuracy
+        self._recalculate_tokens()
+        
         return {
             "total_messages": len(self._messages),
-            "estimated_tokens": self._current_tokens,
+            "current_tokens": self._current_tokens,
+            "estimated_tokens": self._current_tokens,  # Alias for compatibility
             "max_tokens": self.config.max_tokens,
-            "usage_percent": round(self._current_tokens / self.config.max_tokens * 100, 1),
+            "usage_percent": round(self._current_tokens / self.config.max_tokens * 100, 1) if self.config.max_tokens > 0 else 0,
             "loaded_skills": list(self._loaded_skills.keys()),
             "loaded_references": list(self._loaded_references.keys()),
             "available_skills": list(self._skill_metadata.keys())
