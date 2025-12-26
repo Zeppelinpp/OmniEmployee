@@ -41,6 +41,10 @@ class LoopConfig:
     # Behavior
     auto_load_skills: bool = True  # Auto-load skills when mentioned
     stream_output: bool = True
+    
+    # Context compression settings
+    compress_threshold: float = 0.7  # Trigger compression at 70% of context window
+    llm_compress_enabled: bool = True  # Use LLM for summarization
 
 
 @dataclass
@@ -84,6 +88,7 @@ class AgentLoop:
         on_tool_start: Callable[[str, dict], None] | None = None,
         on_tool_end: Callable[[str, ToolResult], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
+        on_compression: Callable[[str], None] | None = None,
     ):
         self.agent = agent
         self.config = config or LoopConfig()
@@ -92,6 +97,7 @@ class AgentLoop:
         self.on_tool_start = on_tool_start
         self.on_tool_end = on_tool_end
         self.on_thinking = on_thinking
+        self.on_compression = on_compression
         
         # Initialize LLM provider
         llm_config = LLMConfig(
@@ -103,11 +109,55 @@ class AgentLoop:
         )
         self.llm = LLMProvider(llm_config)
         
+        # Auto-detect context window from model
+        self._setup_context_window()
+        
+        # Set up LLM compression callback
+        if self.config.llm_compress_enabled:
+            self.agent.context.set_llm_summarize_callback(self._summarize_conversation)
+        
         # State tracking
         self.state = LoopState.IDLE
         self._iteration = 0
         self._tool_calls_count = 0
         self._total_tokens = 0
+    
+    def _setup_context_window(self) -> None:
+        """Auto-detect and configure context window from model."""
+        context_window = self.llm.get_model_context_window()
+        
+        # Update context manager config
+        self.agent.context.config.max_tokens = context_window
+        self.agent.context.config.compress_threshold = self.config.compress_threshold
+        self.agent.context.config.llm_compress_enabled = self.config.llm_compress_enabled
+    
+    async def _summarize_conversation(self, conversation_text: str) -> str:
+        """Summarize conversation using LLM."""
+        summary_prompt = f"""Please summarize the following conversation between a user and an AI assistant. 
+Focus on:
+1. Key topics discussed
+2. Important decisions or conclusions
+3. Any pending tasks or follow-ups
+4. Critical information that should be remembered
+
+Keep the summary concise but comprehensive (around 200-400 words).
+
+Conversation:
+{conversation_text}
+
+Summary:"""
+        
+        messages = [{"role": "user", "content": summary_prompt}]
+        
+        # Use a smaller max_tokens for summary
+        original_max = self.llm.config.max_tokens
+        self.llm.config.max_tokens = 1024
+        
+        try:
+            response = await self.llm.complete(messages)
+            return response.content or ""
+        finally:
+            self.llm.config.max_tokens = original_max
     
     async def run(self, user_input: str) -> LoopResult:
         """Run the agent loop until completion."""
@@ -123,6 +173,12 @@ class AgentLoop:
         
         while self._iteration < self.config.max_iterations:
             self._iteration += 1
+            
+            # Check if context compression is needed
+            if self.agent.context.needs_compression():
+                summary = await self.agent.context.compress_context_async()
+                if summary and self.on_compression:
+                    self.on_compression(summary)
             
             try:
                 # Get LLM response
@@ -194,6 +250,13 @@ class AgentLoop:
         
         while self._iteration < self.config.max_iterations:
             self._iteration += 1
+            
+            # Check if context compression is needed
+            if self.agent.context.needs_compression():
+                yield "\n\n📦 **Compressing context...**\n"
+                summary = await self.agent.context.compress_context_async()
+                if summary:
+                    yield f"_Context compressed. Summary: {summary[:200]}..._\n\n"
             
             content_buffer = ""
             tool_calls_buffer: list[dict] = []
@@ -308,13 +371,31 @@ class AgentLoop:
                 "type": "function",
                 "function": {
                     "name": "load_skill",
-                    "description": "Load a skill to get detailed instructions. Use when you need specialized knowledge.",
+                    "description": "Load a skill to get detailed instructions. Use when you need specialized knowledge. You can load multiple skills simultaneously for complex tasks.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name": {
                                 "type": "string",
                                 "description": "Name of the skill to load"
+                            }
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "unload_skill",
+                    "description": "Unload a skill to free up context space. Use when switching topics or when a skill is no longer needed. This also unloads all references associated with the skill.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Name of the skill to unload"
                             }
                         },
                         "required": ["name"],
@@ -348,7 +429,7 @@ class AgentLoop:
                 "type": "function",
                 "function": {
                     "name": "list_skills",
-                    "description": "List all available skills with their descriptions. Call with empty object {}.",
+                    "description": "List all available skills with their descriptions and loading status. Shows which skills are currently loaded (✓) and which are available (○).",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -391,6 +472,8 @@ class AgentLoop:
         # Handle skill management tools
         if name == "load_skill":
             result = self._handle_load_skill(arguments.get("name", ""))
+        elif name == "unload_skill":
+            result = self._handle_unload_skill(arguments.get("name", ""))
         elif name == "load_skill_reference":
             result = self._handle_load_skill_reference(
                 arguments.get("skill_name", ""),
@@ -419,16 +502,42 @@ class AgentLoop:
         success = self.agent.load_skill(skill_name)
         
         if success:
-            skill = self.agent.skills.load_skill(skill_name)
+            loaded_skills = self.agent.skills.list_loaded_skills()
+            available_refs = self.agent.get_skill_references(skill_name)
+            refs_info = f" Available references: {available_refs}" if available_refs else ""
             return ToolResult(
                 status=ToolResultStatus.SUCCESS,
-                output=f"Skill '{skill_name}' loaded successfully. Instructions are now available in context."
+                output=f"Skill '{skill_name}' loaded successfully.{refs_info}\nCurrently loaded skills: {loaded_skills}"
             )
         else:
             return ToolResult(
                 status=ToolResultStatus.ERROR,
                 error=f"Failed to load skill '{skill_name}'. It may not exist or exceed token budget."
             )
+    
+    def _handle_unload_skill(self, skill_name: str) -> ToolResult:
+        """Handle skill unloading."""
+        if not skill_name:
+            return ToolResult(
+                status=ToolResultStatus.ERROR,
+                error="Skill name is required"
+            )
+        
+        if not self.agent.skills.is_loaded(skill_name):
+            return ToolResult(
+                status=ToolResultStatus.ERROR,
+                error=f"Skill '{skill_name}' is not currently loaded."
+            )
+        
+        self.agent.unload_skill(skill_name)
+        
+        loaded_skills = self.agent.skills.list_loaded_skills()
+        context_stats = self.agent.context.get_context_stats()
+        
+        return ToolResult(
+            status=ToolResultStatus.SUCCESS,
+            output=f"Skill '{skill_name}' unloaded successfully.\nCurrently loaded skills: {loaded_skills}\nContext usage: {context_stats['usage_percent']}%"
+        )
     
     def _handle_load_skill_reference(self, skill_name: str, ref_path: str) -> ToolResult:
         """Handle loading a skill reference file."""

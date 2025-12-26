@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator
 from dotenv import load_dotenv
 import litellm
-from litellm import acompletion
+from litellm import acompletion, get_max_tokens, model_cost
 
 # Load environment variables from .env file
 load_dotenv()
@@ -338,6 +338,69 @@ class LLMProvider:
             "api_base": self.config.api_base or "(default)",
             "api_key_set": bool(self.config.api_key),
         }
+    
+    def get_model_context_window(self) -> int:
+        """Get the maximum context window size for the current model.
+        
+        This returns max_input_tokens which represents the full context window.
+        
+        Returns:
+            Maximum tokens for the model's context window.
+            Falls back to 128000 if model info is not available.
+        """
+        # First try to get from model_cost dict (more accurate for input tokens)
+        try:
+            model_name = self.config.model.lower()
+            if model_name in model_cost:
+                info = model_cost[model_name]
+                if "max_input_tokens" in info:
+                    return info["max_input_tokens"]
+                if "max_tokens" in info:
+                    return info["max_tokens"]
+        except Exception:
+            pass
+        
+        # Fallback to get_max_tokens (returns max_output_tokens for some models)
+        try:
+            model_name = self._get_model_name()
+            max_tokens = get_max_tokens(model_name)
+            if max_tokens:
+                return max_tokens
+        except Exception:
+            pass
+        
+        # Default fallback
+        return 128000
+    
+    def get_model_info(self) -> dict:
+        """Get detailed model information including context window and costs.
+        
+        Returns:
+            Dict with model capabilities and limits.
+        """
+        model_name = self.config.model.lower()
+        info = {
+            "model": self.config.model,
+            "provider": self.provider,
+            "context_window": self.get_model_context_window(),
+        }
+        
+        # Try to get additional info from model_cost
+        try:
+            if model_name in model_cost:
+                cost_info = model_cost[model_name]
+                info.update({
+                    "max_input_tokens": cost_info.get("max_input_tokens"),
+                    "max_output_tokens": cost_info.get("max_output_tokens"),
+                    "input_cost_per_token": cost_info.get("input_cost_per_token"),
+                    "output_cost_per_token": cost_info.get("output_cost_per_token"),
+                    "supports_function_calling": cost_info.get("supports_function_calling", False),
+                    "supports_vision": cost_info.get("supports_vision", False),
+                })
+        except Exception:
+            pass
+        
+        return info
     
     @staticmethod
     def list_models() -> dict[str, list[str]]:

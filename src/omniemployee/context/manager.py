@@ -1,19 +1,23 @@
 """Context manager with progressive disclosure and smart compression."""
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Awaitable, Any
 from src.omniemployee.context.message import Message, MessageRole, ToolCall, ToolResult
 
 
 @dataclass
 class ContextConfig:
     """Configuration for context management."""
-    max_tokens: int = 128000  # Model's context window
+    max_tokens: int = 128000  # Model's context window (will be auto-detected)
     reserved_for_output: int = 4096  # Reserve for model output
     skill_token_budget: int = 8000  # Budget per loaded skill
-    compress_threshold: float = 0.8  # Compress when reaching this % of max
+    compress_threshold: float = 0.7  # Trigger LLM compression at 70% of max
     keep_recent_turns: int = 5  # Always keep N recent conversation turns
     summarize_tool_results: bool = True  # Summarize long tool outputs
+    
+    # LLM compression settings
+    llm_compress_enabled: bool = True  # Enable LLM-based summarization
+    llm_compress_model: str | None = None  # Model for compression (None = use same model)
 
 
 class ContextManager:
@@ -27,6 +31,10 @@ class ContextManager:
         self._skill_metadata: dict[str, dict] = {}  # skill_name -> metadata only
         self._loaded_references: dict[str, str] = {}  # "skill:ref_path" -> content (Phase 3)
         self._current_tokens: int = 0
+        
+        # LLM compression callback (set by AgentLoop)
+        self._llm_summarize_callback: Callable[[str], Awaitable[str]] | None = None
+        self._compression_pending: bool = False
     
     @property
     def available_tokens(self) -> int:
@@ -49,12 +57,41 @@ class ContextManager:
         """Add a message to the context."""
         tokens = message.estimated_tokens
         
-        # Check if we need to compress
+        # Check if we need to trigger compression
         if self._current_tokens + tokens > self.config.max_tokens * self.config.compress_threshold:
-            self._compress_context()
+            self._compression_pending = True
         
         self._messages.append(message)
         self._current_tokens += tokens
+    
+    def set_llm_summarize_callback(self, callback: Callable[[str], Awaitable[str]]) -> None:
+        """Set the callback for LLM-based summarization."""
+        self._llm_summarize_callback = callback
+    
+    def needs_compression(self) -> bool:
+        """Check if context compression is needed."""
+        return self._compression_pending
+    
+    async def compress_context_async(self) -> str | None:
+        """Compress context using LLM summarization.
+        
+        Returns:
+            Summary of compressed content, or None if compression not needed/failed.
+        """
+        if not self._compression_pending:
+            return None
+        
+        self._compression_pending = False
+        
+        # If LLM compression is enabled and callback is set
+        if self.config.llm_compress_enabled and self._llm_summarize_callback:
+            summary = await self._compress_with_llm()
+            if summary:
+                return summary
+        
+        # Fallback to simple compression
+        self._compress_context()
+        return None
     
     def add_user_message(self, content: str) -> Message:
         """Add a user message."""
@@ -223,8 +260,60 @@ class ContextManager:
     
     # ==================== Context Compression ====================
     
+    async def _compress_with_llm(self) -> str | None:
+        """Use LLM to summarize older conversation turns."""
+        if not self._llm_summarize_callback:
+            return None
+        
+        keep_count = self.config.keep_recent_turns * 2
+        if len(self._messages) <= keep_count:
+            return None
+        
+        # Get messages to compress
+        to_compress = self._messages[:-keep_count]
+        to_keep = self._messages[-keep_count:]
+        
+        # Build conversation text for summarization
+        conversation_parts = []
+        for msg in to_compress:
+            if msg.role == MessageRole.USER:
+                conversation_parts.append(f"User: {msg.content or ''}")
+            elif msg.role == MessageRole.ASSISTANT:
+                content = msg.content or ""
+                if msg.tool_calls:
+                    tool_names = [tc.name for tc in msg.tool_calls]
+                    content += f" [Called tools: {', '.join(tool_names)}]"
+                conversation_parts.append(f"Assistant: {content}")
+            elif msg.role == MessageRole.TOOL and msg.tool_result:
+                result_preview = msg.tool_result.content[:200] + "..." if len(msg.tool_result.content) > 200 else msg.tool_result.content
+                conversation_parts.append(f"Tool Result: {result_preview}")
+        
+        if not conversation_parts:
+            return None
+        
+        conversation_text = "\n".join(conversation_parts)
+        
+        # Call LLM to summarize
+        try:
+            summary = await self._llm_summarize_callback(conversation_text)
+            
+            if summary:
+                # Replace old messages with summary
+                summary_msg = Message(
+                    role=MessageRole.SYSTEM,
+                    content=f"[Conversation Summary]\n{summary}",
+                    metadata={"is_summary": True, "compressed_turns": len(to_compress)}
+                )
+                self._messages = [summary_msg] + to_keep
+                self._recalculate_tokens()
+                return summary
+        except Exception:
+            pass
+        
+        return None
+    
     def _compress_context(self) -> None:
-        """Compress context to free up space."""
+        """Compress context to free up space (synchronous fallback)."""
         # Strategy 1: Summarize old tool results
         self._summarize_old_tool_results()
         
