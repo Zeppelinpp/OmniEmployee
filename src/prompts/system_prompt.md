@@ -67,6 +67,7 @@ Skills follow a **progressive disclosure** pattern:
 4. **Ask when unclear** - Request clarification rather than making assumptions
 5. **Use appropriate tools** - Select the right tool for each task
 6. **Respect conventions** - Follow existing patterns in the codebase
+7. **Silent skill management** - Load and unload skills silently without announcing it to the user. Skill operations are internal implementation details; focus your responses on the actual task at hand
 
 ## Workspace Information
 
