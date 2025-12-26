@@ -1,186 +1,149 @@
 ---
 name: codebase-tools
 description: Advanced codebase exploration and manipulation toolkit for searching code, navigating project structure, and making precise file edits.
-license: MIT
-version: 1.0.0
-tags: [development, search, navigation, editing]
-when_to_use: When you need to explore, search, or modify code in a project. Use for finding function definitions, searching for patterns, understanding project structure, or making targeted code changes.
-required_tools: [grep, list_dir, read_file, write_file]
-required_packages: [ripgrep, fd]
 ---
 
 # Codebase Tools Guide
 
 ## Overview
 
-This skill provides patterns and best practices for exploring and manipulating codebases efficiently using the built-in tools: `grep`, `list_dir`, `read_file`, and `write_file`.
+This skill provides a standard operating procedure (SOP) for exploring, analyzing, and modifying codebases. It guides the agent through efficient code search, navigation, and precise file modifications.
 
-## Quick Reference
+## Standard Operating Procedure
 
-| Task | Tool | Example |
-|------|------|---------|
-| Find code by content | `grep` | Search for function definitions |
-| Explore structure | `list_dir` | Navigate directories |
-| Read file content | `read_file` | View specific lines |
-| Modify files | `write_file` | Make targeted edits |
+### Step 1: Explore Project Structure
 
-## Search Patterns
-
-### Finding Function Definitions
+Before making any changes, understand the project layout:
 
 ```python
-# Python functions
-grep(pattern=r"def \w+\(", file_type="py")
-
-# TypeScript/JavaScript functions  
-grep(pattern=r"(function|const|let)\s+\w+\s*=?\s*\(", file_type="ts")
-
-# Class definitions
-grep(pattern=r"class \w+", file_type="py")
+list_dir(path=".", depth=2)
 ```
 
-### Finding Import Statements
+This helps establish:
+- Project organization and folder structure
+- Location of source code, tests, and configuration
+- Key entry points (main.py, index.ts, etc.)
+
+### Step 2: Search for Relevant Code
+
+Use `grep` to find specific code patterns. If searching for a function, class, or variable:
 
 ```python
-# Python imports
-grep(pattern=r"^(from|import)\s+", file_type="py")
+# Find function definitions
+grep(pattern=r"def function_name\(", file_type="py")
 
-# JS/TS imports
-grep(pattern=r"^import\s+", file_type="ts")
+# Find class definitions
+grep(pattern=r"class ClassName", file_type="py")
+
+# Find all usages of a variable
+grep(pattern=r"\bvariable_name\b", file_type="py", context_lines=2)
 ```
 
-### Finding TODO/FIXME Comments
+**Important**: Always use appropriate filters:
+- Specify `file_type` to avoid searching irrelevant files
+- Use `context_lines` to understand surrounding code
+- Use word boundaries (`\b`) for precise matching
 
-```python
-grep(pattern=r"(TODO|FIXME|HACK|XXX):", context_lines=1)
-```
+### Step 3: Read and Understand Context
 
-## Navigation Patterns
-
-### Exploring Project Structure
-
-```python
-# Get top-level structure
-list_dir(depth=1)
-
-# Explore specific directory
-list_dir(path="src", depth=2)
-
-# Find specific file types
-list_dir(pattern="*.py", depth=3)
-```
-
-### Understanding a New Codebase
-
-1. **Start with the root**: `list_dir(depth=1)` to see top-level structure
-2. **Check for entry points**: Look for `main.py`, `index.ts`, `app.py`
-3. **Find configuration**: Search for `config`, `settings`, `*.yaml`, `*.json`
-4. **Locate tests**: `list_dir(path="tests")` or `list_dir(pattern="*test*")`
-
-## Reading Patterns
-
-### Smart File Reading
+Once you've located relevant code, read the full context:
 
 ```python
 # Read entire small file
-read_file(path="config.yaml")
+read_file(path="src/module.py")
 
 # Read specific section of large file
-read_file(path="main.py", start_line=100, end_line=150)
-
-# Read function definition (after finding line with grep)
-read_file(path="utils.py", start_line=45, end_line=60)
+read_file(path="src/large_file.py", start_line=100, end_line=150)
 ```
 
-### Context-Aware Reading
+**Important**: Always read before writing:
+- Understand the current implementation
+- Identify dependencies and side effects
+- Note the code style and conventions
 
-When you find something with `grep`, always read surrounding context:
+### Step 4: Plan Modifications
 
-1. Use `grep` to find the target
-2. Note the line number
-3. Use `read_file` with `start_line` and `end_line` to get full context
+Before making changes:
+1. Identify ALL locations that need modification
+2. Determine the safest modification approach
+3. Plan verification steps
 
-## Editing Patterns
+| Modification Type | Approach |
+|-------------------|----------|
+| Single line change | `write_file` with `mode="replace_lines"` |
+| Add new code | `write_file` with `mode="insert"` |
+| Append to file | `write_file` with `mode="append"` |
+| Replace entire file | `write_file` with `mode="overwrite"` |
 
-### Safe File Modifications
+### Step 5: Execute Changes
 
-**Always follow this workflow:**
-
-1. **Read first**: `read_file(path="target.py")` to understand current state
-2. **Plan changes**: Identify exact lines to modify
-3. **Make precise edits**: Use `write_file` with appropriate mode
-
-### Editing Modes
+Apply changes incrementally:
 
 ```python
-# Replace entire file (for new files or complete rewrites)
-write_file(path="new_file.py", content="...", mode="overwrite")
-
-# Append to file (for adding to end)
-write_file(path="log.txt", content="new entry", mode="append")
-
-# Insert at specific line
-write_file(path="main.py", content="new_code", mode="insert", start_line=50)
-
 # Replace specific lines
 write_file(
-    path="main.py",
-    content="replacement_code",
+    path="src/module.py",
+    content="new_code_here",
     mode="replace_lines",
     start_line=45,
     end_line=50
 )
+
+# Insert at specific line
+write_file(
+    path="src/module.py",
+    content="new_import_statement",
+    mode="insert",
+    start_line=5
+)
 ```
 
-## Best Practices
+### Step 6: Verify Results
 
-### 1. Search Before You Read
+After each change, verify correctness:
 
-Don't read entire files blindly. Use `grep` to find relevant sections first.
+```python
+# Confirm changes were applied
+read_file(path="src/module.py", start_line=40, end_line=55)
 
-### 2. Minimal Changes
+# Verify no remaining old code
+grep(pattern="old_function_name", file_type="py")
 
-When editing, change only what's necessary. Use `replace_lines` mode for surgical edits.
-
-### 3. Verify After Changes
-
-After making edits, use `read_file` to verify the changes are correct.
-
-### 4. Respect Project Conventions
-
-- Match existing code style
-- Preserve indentation
-- Follow naming conventions
-
-## Common Workflows
-
-### Bug Investigation
-
-```
-1. grep(pattern="error_message") → Find where error occurs
-2. read_file(path=found_file, start_line=N-10, end_line=N+10) → Get context
-3. grep(pattern="function_name") → Find function definition
-4. read_file(...) → Understand the function
-5. write_file(..., mode="replace_lines") → Fix the bug
+# Check for syntax errors (if applicable)
+run_command(command="python -m py_compile src/module.py")
 ```
 
-### Adding a New Feature
+## Quick Reference
+
+| Task | Tool | Usage |
+|------|------|-------|
+| Explore structure | `list_dir` | `list_dir(path="src", depth=2)` |
+| Search code | `grep` | `grep(pattern="def func", file_type="py")` |
+| Read file | `read_file` | `read_file(path="file.py")` |
+| Modify file | `write_file` | `write_file(path, content, mode)` |
+| Run command | `run_command` | `run_command(command="pytest")` |
+
+## Error Handling
+
+**IMPORTANT**: When you encounter errors (e.g., "File not found", "Permission denied", "Pattern not found"), you MUST load the reference document for detailed solutions:
 
 ```
-1. list_dir(depth=2) → Understand project structure
-2. grep(pattern="similar_feature") → Find related code
-3. read_file(...) → Study the pattern
-4. write_file(..., mode="overwrite") → Create new file
-5. read_file(...) → Verify creation
+load_skill_reference("codebase-tools", "reference.md")
 ```
 
-### Code Refactoring
+The reference document contains:
+- **Tool Parameters** - Complete parameter documentation for all tools
+- **Error Solutions** - Step-by-step solutions for common issues
+- **Advanced Patterns** - Complex search strategies and multi-file analysis
 
-```
-1. grep(pattern="old_name") → Find all occurrences
-2. For each occurrence:
-   a. read_file(...) → Get context
-   b. write_file(..., mode="replace_lines") → Update
-3. grep(pattern="old_name") → Verify no remaining occurrences
-```
+## Additional Resources
 
+For detailed information on tool parameters, advanced search techniques, and error handling, load [reference.md](./reference.md) using `load_skill_reference`.
+
+Contents include:
+- **Tool Reference** - Complete parameter documentation for `grep`, `list_dir`, `read_file`, `write_file`
+- **Advanced Search Patterns** - Language-specific regex patterns (Python, TypeScript, Go)
+- **Complex Search Strategies** - Finding dead code, security issues, performance problems
+- **Multi-File Analysis** - Dependency analysis, call graph construction
+- **Error Handling** - File not found, permission errors, syntax errors, rollback strategies
+- **Best Practices** - Minimal changes, verification workflows, code style preservation

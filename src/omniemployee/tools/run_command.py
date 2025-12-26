@@ -96,14 +96,25 @@ Use working_dir to specify execution directory. Commands run in workspace root b
             stdout_text = stdout.decode("utf-8", errors="replace").strip()
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
             
-            # Combine output
+            # Build output with command info
             output_parts = []
+            
+            # Add command information at the top
+            output_parts.append(f"$ {command}")
+            if working_dir and str(cwd) != str(self.workspace_root):
+                output_parts.append(f"(in {cwd})")
+            output_parts.append("")  # Empty line separator
+            
+            # Add command output
             if stdout_text:
                 output_parts.append(stdout_text)
             if stderr_text:
                 output_parts.append(f"[stderr]\n{stderr_text}")
             
-            output = "\n".join(output_parts) if output_parts else "(no output)"
+            if not stdout_text and not stderr_text:
+                output_parts.append("(no output)")
+            
+            output = "\n".join(output_parts)
             
             if proc.returncode == 0:
                 return ToolResult(

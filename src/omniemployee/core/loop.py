@@ -227,9 +227,22 @@ class AgentLoop:
                     
                     # Execute tools and yield status
                     for tc in tool_calls_buffer:
-                        yield f"\n\n🔧 **{tc['name']}**\n"
+                        tool_name = tc["name"]
+                        tool_args = tc["arguments"]
                         
-                        result = await self._execute_single_tool(tc["name"], tc["arguments"])
+                        # Show tool name and arguments
+                        yield f"\n\n🔧 **{tool_name}**\n"
+                        
+                        # For run_command, show the command being executed
+                        if tool_name == "run_command" and "command" in tool_args:
+                            command = tool_args["command"]
+                            working_dir = tool_args.get("working_dir")
+                            cmd_display = f"$ {command}"
+                            if working_dir:
+                                cmd_display += f" (in {working_dir})"
+                            yield f"```\n{cmd_display}\n```\n"
+                        
+                        result = await self._execute_single_tool(tool_name, tool_args)
                         
                         self.agent.context.add_tool_result(
                             tool_call_id=tc["id"],
@@ -237,10 +250,15 @@ class AgentLoop:
                             is_error=not result.success
                         )
                         
-                        # Yield truncated result
+                        # Yield result
                         result_preview = result.to_message()
-                        if len(result_preview) > 200:
-                            result_preview = result_preview[:200] + "..."
+                        
+                        # For run_command, the output already includes the command at the top
+                        # So we can show more of the output
+                        max_preview = 500 if tool_name != "run_command" else 800
+                        if len(result_preview) > max_preview:
+                            result_preview = result_preview[:max_preview] + "..."
+                        
                         yield f"```\n{result_preview}\n```\n"
                     
                     self.state = LoopState.THINKING
