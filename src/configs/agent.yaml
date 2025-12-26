@@ -1,0 +1,101 @@
+# OmniEmployee Agent Configuration
+
+agent:
+  name: "OmniEmployee"
+  version: "0.1.0"
+
+# LLM Configuration (uses LiteLLM for unified access)
+# Supported providers: OpenAI, Anthropic, Google, Azure, Ollama, DeepSeek, Groq, etc.
+llm:
+  # Model selection - examples:
+  # OpenAI: gpt-4o, gpt-4o-mini, gpt-4-turbo, o1-preview
+  # Anthropic: claude-sonnet-4-20250514, claude-3-5-sonnet-20241022, claude-3-opus-20240229
+  # Google: gemini-1.5-pro, gemini-1.5-flash
+  # DeepSeek: deepseek-chat, deepseek-coder
+  # Ollama: ollama/llama3, ollama/qwen2.5-coder
+  model: "gpt-4o"
+  
+  temperature: 0.7
+  max_tokens: 4096
+  
+  # Optional: Override API base URL
+  # api_base: "https://api.openai.com/v1"
+  
+  # Optional: Model-specific parameters
+  # top_p: 0.9
+  # frequency_penalty: 0.0
+  # presence_penalty: 0.0
+
+# Agent Loop Configuration
+loop:
+  max_iterations: 50
+  max_tool_calls_per_turn: 10
+  auto_load_skills: true
+  stream_output: true
+
+# Context Management
+context:
+  max_tokens: 128000
+  reserved_for_output: 4096
+  skill_token_budget: 8000
+  compress_threshold: 0.8
+  keep_recent_turns: 5
+  summarize_tool_results: true
+
+# Skills Configuration
+skills:
+  directory: "skills"
+  auto_discover: true
+  preload: []  # Skills to preload at startup
+
+# Tools Configuration
+tools:
+  # Grep tool (uses ripgrep)
+  grep:
+    max_results: 50
+    timeout: 30
+  
+  # List directory tool
+  list_dir:
+    max_depth: 5
+    show_hidden: false
+  
+  # Read file tool
+  read_file:
+    max_lines: 500
+  
+  # Write file tool
+  write_file:
+    create_backups: true
+    backup_dir: ".omniemployee/backups"
+
+# Security Configuration
+security:
+  # Allowed paths for file operations (relative to workspace)
+  allowed_paths:
+    - "."
+  
+  # Blocked file patterns
+  blocked_patterns:
+    - "*.env"
+    - "*.key"
+    - "*.pem"
+    - "*secret*"
+  
+  # Commands requiring confirmation
+  confirm_commands:
+    - "rm"
+    - "mv"
+    - "git push"
+
+# Environment Variables Reference:
+# OPENAI_API_KEY - OpenAI API key
+# ANTHROPIC_API_KEY - Anthropic API key  
+# GOOGLE_API_KEY - Google/Gemini API key
+# DEEPSEEK_API_KEY - DeepSeek API key
+# OPENAI_BASE_URL or API_BASE - Custom API base URL
+# MODEL - Override model from config
+# TEMPERATURE - Override temperature
+# MAX_ITERATIONS - Override max iterations
+# VERBOSE - Show token usage
+# DEBUG - Show stack traces
