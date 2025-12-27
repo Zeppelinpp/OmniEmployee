@@ -8,7 +8,7 @@ import json
 def get_current_time() -> dict:
     """Return current time information in multiple formats."""
     now = datetime.now()
-    
+
     return {
         "current_datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
         "date": now.strftime("%Y-%m-%d"),
@@ -27,4 +27,3 @@ if __name__ == "__main__":
     print(f"Full Datetime: {result['current_datetime']}")
     print(f"\nJSON Output:")
     print(json.dumps(result, indent=2, ensure_ascii=False))
-

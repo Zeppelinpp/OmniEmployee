@@ -1,6 +1,11 @@
 """Built-in tools for the agent."""
 
-from src.omniemployee.tools.base import BaseTool, ToolResult, ToolResultStatus, ToolDefinition
+from src.omniemployee.tools.base import (
+    BaseTool,
+    ToolResult,
+    ToolResultStatus,
+    ToolDefinition,
+)
 from src.omniemployee.tools.registry import ToolRegistry
 from src.omniemployee.tools.grep import GrepTool
 from src.omniemployee.tools.list_dir import ListDirTool
@@ -12,7 +17,7 @@ from src.omniemployee.tools.web_extract import WebExtractTool
 
 __all__ = [
     "BaseTool",
-    "ToolResult", 
+    "ToolResult",
     "ToolResultStatus",
     "ToolDefinition",
     "ToolRegistry",

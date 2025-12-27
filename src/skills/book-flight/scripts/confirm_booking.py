@@ -10,13 +10,13 @@ from datetime import datetime
 
 def generate_booking_reference() -> str:
     """Generate a random booking reference code."""
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
 def generate_ticket_number() -> str:
     """Generate a mock e-ticket number."""
     prefix = random.choice(["999", "880", "781", "086"])
-    number = ''.join(random.choices(string.digits, k=10))
+    number = "".join(random.choices(string.digits, k=10))
     return f"{prefix}-{number}"
 
 
@@ -30,16 +30,18 @@ def confirm_booking(
     """Generate a mock booking confirmation."""
     booking_ref = generate_booking_reference()
     booking_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     passenger_tickets = []
     for passenger in passengers:
-        passenger_tickets.append({
-            "name": passenger.get("name", "Passenger"),
-            "ticket_number": generate_ticket_number(),
-            "seat": f"{random.randint(1, 40)}{random.choice('ABCDEF')}",
-            "meal_preference": passenger.get("meal", "Standard"),
-        })
-    
+        passenger_tickets.append(
+            {
+                "name": passenger.get("name", "Passenger"),
+                "ticket_number": generate_ticket_number(),
+                "seat": f"{random.randint(1, 40)}{random.choice('ABCDEF')}",
+                "meal_preference": passenger.get("meal", "Standard"),
+            }
+        )
+
     confirmation = {
         "status": "CONFIRMED",
         "booking_reference": booking_ref,
@@ -58,7 +60,7 @@ def confirm_booking(
             "This is a MOCK booking for demonstration purposes only.",
         ],
     }
-    
+
     return confirmation
 
 
@@ -82,14 +84,14 @@ def format_confirmation(confirmation: dict) -> str:
     lines.append("-" * 60)
     lines.append("  PASSENGER INFORMATION")
     lines.append("-" * 60)
-    
-    for i, p in enumerate(confirmation['passengers'], 1):
+
+    for i, p in enumerate(confirmation["passengers"], 1):
         lines.append(f"  Passenger {i}: {p['name']}")
         lines.append(f"    E-Ticket: {p['ticket_number']}")
         lines.append(f"    Seat: {p['seat']}")
         lines.append(f"    Meal: {p['meal_preference']}")
         lines.append("")
-    
+
     lines.append("-" * 60)
     lines.append("  CONTACT INFORMATION")
     lines.append("-" * 60)
@@ -99,13 +101,13 @@ def format_confirmation(confirmation: dict) -> str:
     lines.append("-" * 60)
     lines.append("  IMPORTANT NOTES")
     lines.append("-" * 60)
-    for note in confirmation['important_notes']:
+    for note in confirmation["important_notes"]:
         lines.append(f"  • {note}")
     lines.append("")
     lines.append("=" * 60)
     lines.append("  Thank you for your booking!")
     lines.append("=" * 60)
-    
+
     return "\n".join(lines)
 
 
@@ -113,14 +115,17 @@ def main():
     parser = argparse.ArgumentParser(description="Confirm a flight booking (mock)")
     parser.add_argument("--flight", required=True, help="Flight number")
     parser.add_argument("--date", required=True, help="Flight date (YYYY-MM-DD)")
-    parser.add_argument("--passengers", required=True, 
-                        help="Passenger info as JSON string, e.g., '[{\"name\": \"John Doe\"}]'")
+    parser.add_argument(
+        "--passengers",
+        required=True,
+        help='Passenger info as JSON string, e.g., \'[{"name": "John Doe"}]\'',
+    )
     parser.add_argument("--email", help="Contact email")
     parser.add_argument("--phone", help="Contact phone")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
-    
+
     args = parser.parse_args()
-    
+
     # Parse passengers
     try:
         passengers = json.loads(args.passengers)
@@ -129,7 +134,7 @@ def main():
     except json.JSONDecodeError:
         # Treat as single passenger name
         passengers = [{"name": args.passengers}]
-    
+
     # Generate confirmation
     confirmation = confirm_booking(
         flight_number=args.flight,
@@ -138,7 +143,7 @@ def main():
         contact_email=args.email,
         contact_phone=args.phone,
     )
-    
+
     if args.json:
         print(json.dumps(confirmation, indent=2, ensure_ascii=False))
     else:
@@ -147,4 +152,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -9,7 +9,7 @@ from datetime import datetime
 
 
 TEMPLATES = {
-    "summary": '''# Research Summary: {topic}
+    "summary": """# Research Summary: {topic}
 
 **Date:** {date}
 **Research Question:** {question}
@@ -35,9 +35,8 @@ TEMPLATES = {
 ## Sources
 
 {sources}
-''',
-
-    "comparison": '''# Comparison Report: {topic}
+""",
+    "comparison": """# Comparison Report: {topic}
 
 **Date:** {date}
 
@@ -62,9 +61,8 @@ TEMPLATES = {
 ## Sources
 
 {sources}
-''',
-
-    "evaluation": '''# Technical Evaluation: {topic}
+""",
+    "evaluation": """# Technical Evaluation: {topic}
 
 **Date:** {date}
 
@@ -97,7 +95,7 @@ TEMPLATES = {
 ## Sources
 
 {sources}
-'''
+""",
 }
 
 
@@ -111,15 +109,15 @@ def parse_notes(notes_content: str) -> dict:
         "limitations": [],
         "next_steps": [],
         "options": [],
-        "recommendation": ""
+        "recommendation": "",
     }
-    
+
     current_section = None
     current_content = []
-    
+
     for line in notes_content.split("\n"):
         line_stripped = line.strip()
-        
+
         # Detect section headers
         if line_stripped.startswith("# "):
             data["topic"] = line_stripped[2:].strip()
@@ -149,42 +147,44 @@ def parse_notes(notes_content: str) -> dict:
                     data[current_section].append(item)
         elif line_stripped and current_section == "recommendation":
             data["recommendation"] += line_stripped + " "
-    
+
     return data
 
 
 def generate_summary(data: dict, template_name: str = "summary") -> str:
     """Generate a formatted summary from parsed data."""
     template = TEMPLATES.get(template_name, TEMPLATES["summary"])
-    
+
     date = datetime.now().strftime("%Y-%m-%d")
-    
+
     # Format findings
-    findings = "\n".join(f"### Finding {i+1}\n{f}\n" for i, f in enumerate(data.get("findings", [])))
+    findings = "\n".join(
+        f"### Finding {i + 1}\n{f}\n" for i, f in enumerate(data.get("findings", []))
+    )
     if not findings:
         findings = "_No findings recorded_"
-    
+
     # Format evidence table
     evidence_rows = []
     for i, finding in enumerate(data.get("findings", [])[:5]):
-        evidence_rows.append(f"| Finding {i+1} | - | Medium |")
+        evidence_rows.append(f"| Finding {i + 1} | - | Medium |")
     evidence_table = "\n".join(evidence_rows) if evidence_rows else "| - | - | - |"
-    
+
     # Format limitations
     limitations = "\n".join(f"- {l}" for l in data.get("limitations", []))
     if not limitations:
         limitations = "- _No limitations noted_"
-    
+
     # Format next steps
     next_steps = "\n".join(f"- {s}" for s in data.get("next_steps", []))
     if not next_steps:
         next_steps = "- _No next steps defined_"
-    
+
     # Format sources
-    sources = "\n".join(f"{i+1}. {s}" for i, s in enumerate(data.get("sources", [])))
+    sources = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(data.get("sources", [])))
     if not sources:
         sources = "_No sources recorded_"
-    
+
     return template.format(
         topic=data.get("topic", "Untitled Research"),
         date=date,
@@ -208,32 +208,44 @@ def generate_summary(data: dict, template_name: str = "summary") -> str:
         integration="_Not assessed_",
         validation="_No validation performed_",
         recommended_for="_Not specified_",
-        not_recommended_for="_Not specified_"
+        not_recommended_for="_Not specified_",
     )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate structured summary from research notes")
-    parser.add_argument("--notes", required=True, help="Path to notes file or raw notes text")
-    parser.add_argument("--format", choices=["brief", "detailed", "executive"], default="detailed",
-                        help="Output format level")
-    parser.add_argument("--template", choices=["summary", "comparison", "evaluation"], default="summary",
-                        help="Template type")
+    parser = argparse.ArgumentParser(
+        description="Generate structured summary from research notes"
+    )
+    parser.add_argument(
+        "--notes", required=True, help="Path to notes file or raw notes text"
+    )
+    parser.add_argument(
+        "--format",
+        choices=["brief", "detailed", "executive"],
+        default="detailed",
+        help="Output format level",
+    )
+    parser.add_argument(
+        "--template",
+        choices=["summary", "comparison", "evaluation"],
+        default="summary",
+        help="Template type",
+    )
     parser.add_argument("--output", help="Output file path (default: stdout)")
-    
+
     args = parser.parse_args()
-    
+
     # Read notes
     notes_path = Path(args.notes)
     if notes_path.exists():
         notes_content = notes_path.read_text()
     else:
         notes_content = args.notes
-    
+
     # Parse and generate
     data = parse_notes(notes_content)
     summary = generate_summary(data, args.template)
-    
+
     # Output
     if args.output:
         Path(args.output).write_text(summary)
@@ -244,4 +256,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

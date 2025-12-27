@@ -96,7 +96,6 @@ def main():
 if __name__ == "__main__":
     main()
 ''',
-
     "comparison": '''#!/usr/bin/env python3
 """Comparison experiment: {hypothesis}"""
 
@@ -215,7 +214,6 @@ def main():
 if __name__ == "__main__":
     main()
 ''',
-
     "validation": '''#!/usr/bin/env python3
 """Validation experiment: {hypothesis}"""
 
@@ -300,18 +298,26 @@ def get_actual_value_2():
 
 if __name__ == "__main__":
     main()
-'''
+''',
 }
 
 
 def detect_experiment_type(hypothesis: str) -> str:
     """Detect the best experiment type based on hypothesis."""
     hypothesis_lower = hypothesis.lower()
-    
-    performance_keywords = ["faster", "slower", "performance", "speed", "benchmark", "latency", "throughput"]
+
+    performance_keywords = [
+        "faster",
+        "slower",
+        "performance",
+        "speed",
+        "benchmark",
+        "latency",
+        "throughput",
+    ]
     comparison_keywords = ["vs", "versus", "compare", "better", "worse", "different"]
     validation_keywords = ["is", "are", "should", "must", "verify", "validate", "check"]
-    
+
     if any(kw in hypothesis_lower for kw in performance_keywords):
         return "performance"
     elif any(kw in hypothesis_lower for kw in comparison_keywords):
@@ -324,48 +330,53 @@ def create_experiment(
     hypothesis: str,
     metric: str = "time",
     iterations: int = 10,
-    experiment_type: str | None = None
+    experiment_type: str | None = None,
 ) -> str:
     """Generate experiment code for a hypothesis."""
     if experiment_type is None:
         experiment_type = detect_experiment_type(hypothesis)
-    
+
     if experiment_type not in EXPERIMENT_TEMPLATES:
         experiment_type = "validation"
-    
+
     template = EXPERIMENT_TEMPLATES[experiment_type]
-    
-    code = template.format(
-        hypothesis=hypothesis,
-        metric=metric,
-        iterations=iterations
-    )
-    
+
+    code = template.format(hypothesis=hypothesis, metric=metric, iterations=iterations)
+
     return code
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate experiment code to validate a hypothesis")
+    parser = argparse.ArgumentParser(
+        description="Generate experiment code to validate a hypothesis"
+    )
     parser.add_argument("--hypothesis", required=True, help="The hypothesis to test")
-    parser.add_argument("--metric", default="time", help="What to measure (default: time)")
-    parser.add_argument("--iterations", type=int, default=10, help="Number of test runs (default: 10)")
-    parser.add_argument("--type", choices=["performance", "comparison", "validation"], 
-                        help="Experiment type (auto-detected if not specified)")
+    parser.add_argument(
+        "--metric", default="time", help="What to measure (default: time)"
+    )
+    parser.add_argument(
+        "--iterations", type=int, default=10, help="Number of test runs (default: 10)"
+    )
+    parser.add_argument(
+        "--type",
+        choices=["performance", "comparison", "validation"],
+        help="Experiment type (auto-detected if not specified)",
+    )
     parser.add_argument("--output", default="experiment.py", help="Output script path")
-    
+
     args = parser.parse_args()
-    
+
     code = create_experiment(
         hypothesis=args.hypothesis,
         metric=args.metric,
         iterations=args.iterations,
-        experiment_type=args.type
+        experiment_type=args.type,
     )
-    
+
     output_path = Path(args.output)
     output_path.write_text(code)
     output_path.chmod(0o755)
-    
+
     print(f"Experiment script generated: {output_path}")
     print(f"  Hypothesis: {args.hypothesis}")
     print(f"  Type: {args.type or detect_experiment_type(args.hypothesis)}")
@@ -378,4 +389,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
