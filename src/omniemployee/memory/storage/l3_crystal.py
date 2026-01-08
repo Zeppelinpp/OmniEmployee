@@ -20,7 +20,7 @@ class PostgresConfig:
     host: str = "localhost"
     port: int = 5432
     database: str = "biem"
-    user: str = "postgres"
+    user: str = ""       # Empty = use current system user
     password: str = ""
     min_connections: int = 2
     max_connections: int = 10
@@ -79,15 +79,20 @@ class L3CrystalStorage:
         """Establish connection pool and ensure tables exist."""
         import asyncpg
         
-        self._pool = await asyncpg.create_pool(
-            host=self.config.host,
-            port=self.config.port,
-            database=self.config.database,
-            user=self.config.user,
-            password=self.config.password,
-            min_size=self.config.min_connections,
-            max_size=self.config.max_connections
-        )
+        # Build connection kwargs (empty user = use system user)
+        conn_kwargs = {
+            "host": self.config.host,
+            "port": self.config.port,
+            "database": self.config.database,
+            "min_size": self.config.min_connections,
+            "max_size": self.config.max_connections,
+        }
+        if self.config.user:
+            conn_kwargs["user"] = self.config.user
+        if self.config.password:
+            conn_kwargs["password"] = self.config.password
+        
+        self._pool = await asyncpg.create_pool(**conn_kwargs)
         
         # Create tables if not exist
         async with self._pool.acquire() as conn:

@@ -11,3 +11,4 @@ wheels/
 .venv
 .env
 
+milvus_biem.db

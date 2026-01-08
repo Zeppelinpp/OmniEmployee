@@ -70,6 +70,7 @@ class TierManager:
         self._running = False
         self._cleanup_task: asyncio.Task | None = None
         self._consolidation_task: asyncio.Task | None = None
+        self._l3_available = False
         
         # Optional LLM callback for consolidation
         self._consolidate_callback: Callable[[list[str]], Awaitable[str]] | None = None
@@ -85,11 +86,22 @@ class TierManager:
         self._consolidate_callback = callback
     
     async def connect_all(self) -> None:
-        """Connect all storage backends."""
+        """Connect all storage backends.
+        
+        L3 (PostgreSQL) is optional - if connection fails, continues without it.
+        """
         await self.l1.connect()
         await self.l2_vector.connect()
         await self.l2_graph.connect()
-        await self.l3.connect()
+        
+        # L3 is optional
+        try:
+            await self.l3.connect()
+            self._l3_available = True
+        except Exception as e:
+            print(f"[Memory] L3 (PostgreSQL) not available: {e}")
+            print("[Memory] Continuing without L3 storage...")
+            self._l3_available = False
     
     async def disconnect_all(self) -> None:
         """Disconnect all storage backends."""
@@ -97,7 +109,8 @@ class TierManager:
         await self.l1.disconnect()
         await self.l2_vector.disconnect()
         await self.l2_graph.disconnect()
-        await self.l3.disconnect()
+        if self._l3_available:
+            await self.l3.disconnect()
     
     # ==================== Node Operations ====================
     
@@ -238,8 +251,9 @@ class TierManager:
             metadata={"node_count": len(nodes)}
         )
         
-        # Store in L3
-        await self.l3.store_fact(fact)
+        # Store in L3 if available
+        if self._l3_available:
+            await self.l3.store_fact(fact)
         
         return fact
     
