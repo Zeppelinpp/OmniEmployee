@@ -17,7 +17,7 @@
             --text-primary: #fcfcfa;
             --text-secondary: #c1c0c0;
             --text-muted: #727072;
-            --accent-cyan: #78dce8;
+            --accent-cyan: #a9dc76;  /* Monokai Pro green */
             --accent-magenta: #ff6188;
             --accent-green: #a9dc76;
             --accent-orange: #fc9867;
@@ -538,7 +538,7 @@
                 document.getElementById('stat-l2g').textContent = 
                     `${stats.l2_graph?.node_count || 0}n/${stats.l2_graph?.edge_count || 0}e`;
                 document.getElementById('stat-l3').textContent = 
-                    stats.l3?.status === 'unavailable' ? '—' : (stats.l3?.facts_count || 0);
+                    stats.l3?.status === 'unavailable' ? '—' : (stats.l3?.links_count || 0);
             } catch (e) {
                 console.error('Failed to load stats:', e);
             }

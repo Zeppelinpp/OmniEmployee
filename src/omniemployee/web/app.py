@@ -100,19 +100,31 @@ async def get_l2_graph():
     
     # Get graph storage directly
     graph = _memory._l2_graph
+    vector = _memory._l2_vector
     
     # Get all nodes and edges from NetworkX
     nodes_data = []
     edges_data = []
     
     for node_id in graph._graph.nodes():
-        node_attrs = graph._graph.nodes[node_id]
-        nodes_data.append({
-            "id": node_id,
-            "content": node_attrs.get("content", "")[:100],
-            "energy": node_attrs.get("energy", 0.5),
-            "tier": node_attrs.get("tier", "L2"),
-        })
+        # Fetch content from Milvus vector storage
+        node = await vector.get(node_id)
+        if node:
+            nodes_data.append({
+                "id": node_id,
+                "content": node.content[:100] + "..." if len(node.content) > 100 else node.content,
+                "energy": node.energy,
+                "tier": node.tier,
+            })
+        else:
+            # Fallback if not found in Milvus
+            node_attrs = graph._graph.nodes[node_id]
+            nodes_data.append({
+                "id": node_id,
+                "content": f"[Node {node_id[:8]}]",
+                "energy": node_attrs.get("energy", 0.5),
+                "tier": "L2",
+            })
     
     for source, target, attrs in graph._graph.edges(data=True):
         edges_data.append({
