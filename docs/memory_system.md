@@ -396,7 +396,15 @@ graph LR
 
 ## 与 Agent Context 的集成
 
-### 数据流图
+### 设计原则
+
+记忆系统采用**动态注入**的方式与 Agent 集成，而非静态模板占位符：
+
+1. **解耦设计**：记忆系统作为可选插件，不修改核心 prompt 模板
+2. **位置固定**：通过 `ContextManager.build_messages()` 保证 sections 顺序一致
+3. **按需注入**：只有召回到相关记忆时才注入，避免空白占位
+
+### 集成数据流
 
 ```mermaid
 graph TB
@@ -451,46 +459,181 @@ async def run_interactive(agent, loop, memory):
             await memory.record_assistant_message(response)
 ```
 
-### Context 位置示意
+---
 
-Section 顺序是固定的，由 `ContextManager.build_messages()` 保证：
+### Context 构建过程
+
+Agent 的 context 通过 `ContextManager.build_messages()` 方法逐步构建：
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent
+    participant CM as ContextManager
+    participant LLM as LLM API
+    
+    Note over Agent,CM: 1. 初始化阶段
+    Agent->>CM: set_system_prompt(template)
+    Note right of CM: 渲染模板:<br/>workspace, tools
+    
+    Note over Agent,CM: 2. 用户输入阶段
+    Agent->>CM: set_memory_context(memories)
+    Note right of CM: 注入召回的记忆
+    
+    Note over Agent,CM: 3. 构建消息阶段
+    Agent->>CM: build_messages()
+    CM->>CM: 1. 添加 system_prompt
+    CM->>CM: 2. 添加 memory_context
+    CM->>CM: 3. 添加 skills_summary
+    CM->>CM: 4. 添加 loaded_instructions
+    CM->>CM: 5. 添加 conversation history
+    CM-->>Agent: messages[]
+    
+    Agent->>LLM: chat(messages)
+    
+    Note over Agent,CM: 4. 清理阶段
+    Agent->>CM: clear_memory_context()
+```
+
+### build_messages() 实现逻辑
+
+```python
+def build_messages(self) -> list[dict]:
+    """Build messages list for LLM API call.
+    
+    Section order (fixed for agent stability):
+    1. System prompt (core instructions, workspace, tools)
+    2. Memory context (relevant memories from BIEM)
+    3. Skills summary (available skills list)
+    4. Loaded skill instructions (detailed instructions)
+    """
+    system_content = self._system_prompt
+    
+    # Memory context (injected between base prompt and skills)
+    if self._memory_context:
+        system_content += f"\n\n{self._memory_context}"
+    
+    # Skills summary
+    skill_summary = self.get_skill_summary()
+    if skill_summary:
+        system_content += f"\n\n{skill_summary}"
+    
+    # Loaded skill instructions
+    skill_instructions = self.get_loaded_skill_instructions()
+    if skill_instructions:
+        system_content += f"\n\n{skill_instructions}"
+    
+    messages = [{"role": "system", "content": system_content}]
+    
+    # Add conversation messages
+    for msg in self._messages:
+        messages.append(msg.to_openai_format())
+    
+    return messages
+```
+
+---
+
+### 最终 Context 结构
+
+Section 顺序是固定的，保证 Agent 行为稳定：
+
+```
+┌────────────────────────────────────────┐
+│ 1. System Prompt (静态)                │
+│    - Core Behavior Loop                │
+│    - Skill Loading Protocol            │
+│    - Guidelines                        │
+│    - Workspace & Tools                 │
+├────────────────────────────────────────┤
+│ 2. Memory Context (动态注入)           │
+│    ## Relevant Memories                │
+│    1. [● E=0.85] ...                   │
+├────────────────────────────────────────┤
+│ 3. Skills Summary (动态)               │
+│    - [○] book-flight                   │
+│    - [✓] codebase-tools                │
+├────────────────────────────────────────┤
+│ 4. Loaded Skill Instructions (动态)    │
+│    ### Skill: codebase-tools           │
+└────────────────────────────────────────┘
+         ↑ System Message 结束
+─────────────────────────────────────────
+         ↓ Conversation Messages 开始
+┌────────────────────────────────────────┐
+│ 5. Conversation History                │
+│    [User]: 之前我们聊了什么？           │
+│    [Assistant]: ...                    │
+├────────────────────────────────────────┤
+│ 6. Current User Message                │
+│    [User]: 给我讲讲 PyTorch 的基础知识  │
+└────────────────────────────────────────┘
+```
+
+### 详细内容示例
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    System Prompt                         │
+│                 1. System Prompt (静态)                  │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │ # Core Behavior Loop                            │    │
-│  │ # Skill Loading Protocol                        │    │
-│  │ # Guidelines                                    │    │
-│  │ # Workspace Information                         │    │
-│  │ # Available Tools                               │    │
+│  │ # OmniEmployee Agent System Prompt              │    │
+│  │ You are OmniEmployee, an AI assistant...        │    │
+│  │                                                 │    │
+│  │ ## Core Behavior Loop                           │    │
+│  │ At each step, follow this reasoning process... │    │
+│  │                                                 │    │
+│  │ ## Skill Loading Protocol                       │    │
+│  │ Skills follow a progressive disclosure pattern..│    │
+│  │                                                 │    │
+│  │ ## Guidelines                                   │    │
+│  │ 1. Read before modifying...                    │    │
+│  │                                                 │    │
+│  │ ## Workspace Information                        │    │
+│  │ Working directory: /Users/ruipu/projects/...   │    │
+│  │                                                 │    │
+│  │ ## Available Tools                              │    │
+│  │ - grep: Search file contents                   │    │
+│  │ - read_file: Read file content                 │    │
+│  │ - write_file: Write to file                    │    │
 │  └─────────────────────────────────────────────────┘    │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │ ## Relevant Memories   ← 动态注入位置            │    │
-│  │ 1. [● E=0.85] 用户正在学习机器学习...            │    │
-│  │    Entities: 机器学习, PyTorch                   │    │
-│  │ 2. [○ E=0.62] 深度学习是机器学习的分支...        │    │
-│  │    Entities: 深度学习, 神经网络                  │    │
+│  │         2. Memory Context (动态注入)            │    │
+│  │                                                 │    │
+│  │ ## Relevant Memories                           │    │
+│  │                                                 │    │
+│  │ 1. [● E=0.85] 用户正在学习机器学习...           │    │
+│  │    Entities: 机器学习, PyTorch                  │    │
+│  │                                                 │    │
+│  │ 2. [○ E=0.62] 深度学习是机器学习的分支...       │    │
+│  │    Entities: 深度学习, 神经网络                 │    │
 │  └─────────────────────────────────────────────────┘    │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │ ## Available Skills (动态添加)                   │    │
-│  │ - [○] book-flight: 航班预订技能                 │    │
-│  │ - [✓] codebase-tools: 代码工具技能              │    │
+│  │          3. Skills Summary (动态)               │    │
+│  │                                                 │    │
+│  │ ## Available Skills (use when needed)          │    │
+│  │ - [○] book-flight: 航班预订技能                │    │
+│  │ - [✓] codebase-tools: 代码工具技能             │    │
+│  │ - [○] research: 研究调研技能                   │    │
 │  └─────────────────────────────────────────────────┘    │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │ ## Loaded Skill Instructions (动态添加)         │    │
-│  │ ### Skill: codebase-tools                       │    │
-│  │ (已加载技能的详细指令...)                        │    │
+│  │      4. Loaded Skill Instructions (动态)        │    │
+│  │                                                 │    │
+│  │ ## Loaded Skill Instructions                   │    │
+│  │                                                 │    │
+│  │ ### Skill: codebase-tools                      │    │
+│  │ This skill provides tools for code analysis... │    │
+│  │ (已加载技能的详细指令...)                       │    │
 │  └─────────────────────────────────────────────────┘    │
 ├─────────────────────────────────────────────────────────┤
-│                   Conversation History                   │
+│              5. Conversation History                     │
+│                                                         │
 │  [User]: 之前我们聊了什么？                              │
-│  [Assistant]: ...                                        │
+│  [Assistant]: 我们讨论了机器学习的基础概念...            │
 ├─────────────────────────────────────────────────────────┤
-│                   Current User Message                   │
+│              6. Current User Message                     │
+│                                                         │
 │  [User]: 给我讲讲 PyTorch 的基础知识                     │
 └─────────────────────────────────────────────────────────┘
 ```
