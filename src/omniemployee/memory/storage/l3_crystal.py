@@ -313,6 +313,34 @@ class L3CrystalStorage:
             )
             return result == "UPDATE 1"
     
+    # ==================== Bulk Query Methods ====================
+    
+    async def get_all_facts(self, limit: int = 100) -> list[CrystalFact]:
+        """Get all facts (limited)."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM crystal_facts
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit
+            )
+            return [self._row_to_fact(row) for row in rows]
+    
+    async def get_all_links(self, limit: int = 100) -> list[Link]:
+        """Get all links (limited)."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM crystal_links
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit
+            )
+            return [self._row_to_link(row) for row in rows]
+    
     # ==================== Utility Methods ====================
     
     async def clear_all(self) -> None:

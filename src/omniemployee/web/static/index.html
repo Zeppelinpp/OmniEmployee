@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BIEM Memory Visualizer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-tertiary: #1a1a24;
+            --border: #2a2a3a;
+            --text-primary: #e8e8f0;
+            --text-secondary: #8888a0;
+            --text-muted: #555566;
+            --accent-cyan: #00d4ff;
+            --accent-magenta: #ff00aa;
+            --accent-green: #00ff88;
+            --accent-orange: #ff8800;
+            --energy-high: #00ff88;
+            --energy-mid: #ffcc00;
+            --energy-low: #ff4444;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(180deg, var(--bg-secondary) 0%, transparent 100%);
+            padding: 1.5rem 2rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-magenta));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .stats-bar {
+            display: flex;
+            gap: 2rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .stat-label {
+            color: var(--text-muted);
+        }
+
+        .stat-value {
+            color: var(--accent-cyan);
+            font-weight: 500;
+        }
+
+        /* Main Layout */
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            height: calc(100vh - 80px);
+        }
+
+        /* Graph Panel */
+        .graph-panel {
+            position: relative;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+        }
+
+        .graph-title {
+            position: absolute;
+            top: 1rem;
+            left: 1rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            z-index: 10;
+        }
+
+        #graph-container {
+            width: 100%;
+            height: 100%;
+        }
+
+        #graph-container svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        .node circle {
+            stroke: var(--bg-primary);
+            stroke-width: 2px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .node:hover circle {
+            stroke: var(--accent-cyan);
+            stroke-width: 3px;
+        }
+
+        .node text {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            fill: var(--text-secondary);
+            pointer-events: none;
+        }
+
+        .link {
+            stroke-opacity: 0.6;
+        }
+
+        .link.temporal { stroke: var(--accent-orange); }
+        .link.semantic { stroke: var(--accent-cyan); }
+        .link.causal { stroke: var(--accent-magenta); }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 0.85rem;
+            max-width: 300px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 100;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+
+        .tooltip.visible {
+            opacity: 1;
+        }
+
+        .tooltip-content {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 8px;
+            line-height: 1.4;
+        }
+
+        .tooltip-energy {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .energy-bar {
+            flex: 1;
+            height: 4px;
+            background: var(--bg-primary);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .energy-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
+
+        /* Data Panel */
+        .data-panel {
+            background: var(--bg-primary);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-secondary);
+        }
+
+        .tab {
+            flex: 1;
+            padding: 1rem;
+            text-align: center;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            color: var(--text-secondary);
+            background: var(--bg-tertiary);
+        }
+
+        .tab.active {
+            color: var(--accent-cyan);
+            border-bottom-color: var(--accent-cyan);
+        }
+
+        .tab-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+
+        .tab-pane {
+            display: none;
+        }
+
+        .tab-pane.active {
+            display: block;
+        }
+
+        /* Database Table Style */
+        .db-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+        }
+
+        .db-table thead {
+            position: sticky;
+            top: 0;
+            background: var(--bg-secondary);
+            z-index: 5;
+        }
+
+        .db-table th {
+            text-align: left;
+            padding: 0.75rem 0.5rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .db-table td {
+            padding: 0.6rem 0.5rem;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-secondary);
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .db-table tr:hover td {
+            background: var(--bg-tertiary);
+        }
+
+        .db-table .id-cell {
+            color: var(--accent-cyan);
+            font-size: 0.7rem;
+        }
+
+        .db-table .energy-cell {
+            font-weight: 500;
+        }
+
+        .energy-high { color: var(--energy-high); }
+        .energy-mid { color: var(--energy-mid); }
+        .energy-low { color: var(--energy-low); }
+
+        .db-table .type-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            font-weight: 500;
+        }
+
+        .type-badge.temporal { background: rgba(255, 136, 0, 0.2); color: var(--accent-orange); }
+        .type-badge.semantic { background: rgba(0, 212, 255, 0.2); color: var(--accent-cyan); }
+        .type-badge.causal { background: rgba(255, 0, 170, 0.2); color: var(--accent-magenta); }
+        .type-badge.user { background: rgba(0, 255, 136, 0.2); color: var(--accent-green); }
+        .type-badge.assistant { background: rgba(0, 212, 255, 0.2); color: var(--accent-cyan); }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+        }
+
+        .empty-state svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 1rem;
+            opacity: 0.5;
+        }
+
+        /* Legend */
+        .graph-legend {
+            position: absolute;
+            bottom: 1rem;
+            left: 1rem;
+            display: flex;
+            gap: 1rem;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            z-index: 10;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .legend-line {
+            width: 20px;
+            height: 3px;
+            border-radius: 2px;
+        }
+
+        /* Refresh Button */
+        .refresh-btn {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: var(--border);
+            color: var(--text-primary);
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-primary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>⧫ BIEM Memory System</h1>
+        <div class="stats-bar">
+            <div class="stat">
+                <span class="stat-label">L1:</span>
+                <span class="stat-value" id="stat-l1">-</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">L2 Vector:</span>
+                <span class="stat-value" id="stat-l2v">-</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">L2 Graph:</span>
+                <span class="stat-value" id="stat-l2g">-</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">L3:</span>
+                <span class="stat-value" id="stat-l3">-</span>
+            </div>
+            <button class="refresh-btn" onclick="refreshAll()">↻ Refresh</button>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <section class="graph-panel">
+            <div class="graph-title">Association Graph (L2)</div>
+            <div id="graph-container"></div>
+            <div class="graph-legend">
+                <div class="legend-item">
+                    <div class="legend-line" style="background: var(--accent-orange)"></div>
+                    <span>Temporal</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-line" style="background: var(--accent-cyan)"></div>
+                    <span>Semantic</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-line" style="background: var(--accent-magenta)"></div>
+                    <span>Causal</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="data-panel">
+            <div class="tabs">
+                <div class="tab active" data-tab="l1">L1 Working</div>
+                <div class="tab" data-tab="l2">L2 Vector</div>
+                <div class="tab" data-tab="l3-facts">L3 Facts</div>
+                <div class="tab" data-tab="l3-links">L3 Links</div>
+            </div>
+            <div class="tab-content">
+                <div class="tab-pane active" id="tab-l1">
+                    <table class="db-table" id="table-l1">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Content</th>
+                                <th>Energy</th>
+                                <th>Source</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="tab-pane" id="tab-l2">
+                    <table class="db-table" id="table-l2">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Content</th>
+                                <th>Energy</th>
+                                <th>Entities</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="tab-pane" id="tab-l3-facts">
+                    <table class="db-table" id="table-l3-facts">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Content</th>
+                                <th>Confidence</th>
+                                <th>Sources</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="tab-pane" id="tab-l3-links">
+                    <table class="db-table" id="table-l3-links">
+                        <thead>
+                            <tr>
+                                <th>Source</th>
+                                <th>Target</th>
+                                <th>Type</th>
+                                <th>Weight</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Energy color helper
+        function getEnergyClass(energy) {
+            if (energy >= 0.7) return 'energy-high';
+            if (energy >= 0.4) return 'energy-mid';
+            return 'energy-low';
+        }
+
+        function getEnergyColor(energy) {
+            if (energy >= 0.7) return '#00ff88';
+            if (energy >= 0.4) return '#ffcc00';
+            return '#ff4444';
+        }
+
+        // Truncate ID for display
+        function shortId(id) {
+            return id ? id.substring(0, 8) : '-';
+        }
+
+        // Load stats
+        async function loadStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const stats = await res.json();
+                
+                document.getElementById('stat-l1').textContent = 
+                    `${stats.l1?.count || 0}/${stats.l1?.capacity || 0}`;
+                document.getElementById('stat-l2v').textContent = 
+                    stats.l2_vector?.row_count || 0;
+                document.getElementById('stat-l2g').textContent = 
+                    `${stats.l2_graph?.node_count || 0}n/${stats.l2_graph?.edge_count || 0}e`;
+                document.getElementById('stat-l3').textContent = 
+                    stats.l3?.status === 'unavailable' ? '—' : (stats.l3?.facts_count || 0);
+            } catch (e) {
+                console.error('Failed to load stats:', e);
+            }
+        }
+
+        // Load L1 data
+        async function loadL1() {
+            try {
+                const res = await fetch('/api/l1');
+                const data = await res.json();
+                const tbody = document.querySelector('#table-l1 tbody');
+                
+                if (data.nodes.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No nodes in working memory</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = data.nodes.map(n => `
+                    <tr>
+                        <td class="id-cell">${shortId(n.id)}</td>
+                        <td title="${n.content}">${n.content}</td>
+                        <td class="energy-cell ${getEnergyClass(n.energy)}">${n.energy}</td>
+                        <td><span class="type-badge ${n.source}">${n.source || '-'}</span></td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load L1:', e);
+            }
+        }
+
+        // Load L2 vector data
+        async function loadL2Vector() {
+            try {
+                const res = await fetch('/api/l2/vector');
+                const data = await res.json();
+                const tbody = document.querySelector('#table-l2 tbody');
+                
+                if (!data.nodes || data.nodes.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No vector nodes</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = data.nodes.map(n => `
+                    <tr>
+                        <td class="id-cell">${shortId(n.id)}</td>
+                        <td title="${n.content}">${n.content}</td>
+                        <td class="energy-cell ${getEnergyClass(n.energy)}">${n.energy}</td>
+                        <td>${(n.entities || []).join(', ') || '-'}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load L2 vector:', e);
+            }
+        }
+
+        // Load L3 facts
+        async function loadL3Facts() {
+            try {
+                const res = await fetch('/api/l3/facts');
+                const data = await res.json();
+                const tbody = document.querySelector('#table-l3-facts tbody');
+                
+                if (!data.facts || data.facts.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${data.message || 'No facts'}</td></tr>`;
+                    return;
+                }
+                
+                tbody.innerHTML = data.facts.map(f => `
+                    <tr>
+                        <td class="id-cell">${shortId(f.id)}</td>
+                        <td title="${f.content}">${f.content}</td>
+                        <td class="energy-cell ${getEnergyClass(f.confidence)}">${f.confidence}</td>
+                        <td>${f.source_count}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load L3 facts:', e);
+            }
+        }
+
+        // Load L3 links
+        async function loadL3Links() {
+            try {
+                const res = await fetch('/api/l3/links');
+                const data = await res.json();
+                const tbody = document.querySelector('#table-l3-links tbody');
+                
+                if (!data.links || data.links.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${data.message || 'No links'}</td></tr>`;
+                    return;
+                }
+                
+                tbody.innerHTML = data.links.map(l => `
+                    <tr>
+                        <td class="id-cell">${shortId(l.source_id)}</td>
+                        <td class="id-cell">${shortId(l.target_id)}</td>
+                        <td><span class="type-badge ${l.type}">${l.type}</span></td>
+                        <td>${l.weight}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load L3 links:', e);
+            }
+        }
+
+        // D3.js Graph Visualization
+        let simulation;
+        
+        async function loadGraph() {
+            try {
+                const res = await fetch('/api/l2/graph');
+                const data = await res.json();
+                
+                renderGraph(data);
+            } catch (e) {
+                console.error('Failed to load graph:', e);
+            }
+        }
+
+        function renderGraph(data) {
+            const container = document.getElementById('graph-container');
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            
+            // Clear existing
+            d3.select('#graph-container').selectAll('*').remove();
+            
+            if (!data.nodes || data.nodes.length === 0) {
+                d3.select('#graph-container')
+                    .append('div')
+                    .attr('class', 'empty-state')
+                    .style('position', 'absolute')
+                    .style('top', '50%')
+                    .style('left', '50%')
+                    .style('transform', 'translate(-50%, -50%)')
+                    .html('<p>No graph data yet</p><p style="font-size: 0.8rem">Chat with the agent to populate memories</p>');
+                return;
+            }
+            
+            const svg = d3.select('#graph-container')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+
+            // Add zoom behavior
+            const g = svg.append('g');
+            
+            svg.call(d3.zoom()
+                .extent([[0, 0], [width, height]])
+                .scaleExtent([0.2, 4])
+                .on('zoom', (event) => {
+                    g.attr('transform', event.transform);
+                }));
+
+            // Create simulation
+            simulation = d3.forceSimulation(data.nodes)
+                .force('link', d3.forceLink(data.links).id(d => d.id).distance(80))
+                .force('charge', d3.forceManyBody().strength(-200))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(30));
+
+            // Create links
+            const link = g.append('g')
+                .selectAll('line')
+                .data(data.links)
+                .join('line')
+                .attr('class', d => `link ${d.type}`)
+                .attr('stroke-width', d => Math.sqrt(d.weight) * 2);
+
+            // Create nodes
+            const node = g.append('g')
+                .selectAll('.node')
+                .data(data.nodes)
+                .join('g')
+                .attr('class', 'node')
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended));
+
+            node.append('circle')
+                .attr('r', d => 8 + (d.energy || 0.5) * 12)
+                .attr('fill', d => getEnergyColor(d.energy || 0.5));
+
+            node.append('text')
+                .attr('dx', 15)
+                .attr('dy', 4)
+                .text(d => d.content ? d.content.substring(0, 20) + '...' : d.id.substring(0, 8));
+
+            // Tooltip
+            const tooltip = d3.select('#tooltip');
+            
+            node.on('mouseenter', (event, d) => {
+                tooltip
+                    .classed('visible', true)
+                    .style('left', (event.pageX + 10) + 'px')
+                    .style('top', (event.pageY - 10) + 'px')
+                    .html(`
+                        <strong>${d.id.substring(0, 16)}...</strong>
+                        <div class="tooltip-content">${d.content || 'No content'}</div>
+                        <div class="tooltip-energy">
+                            <span>Energy:</span>
+                            <div class="energy-bar">
+                                <div class="energy-fill" style="width: ${(d.energy || 0.5) * 100}%; background: ${getEnergyColor(d.energy || 0.5)}"></div>
+                            </div>
+                            <span>${(d.energy || 0.5).toFixed(2)}</span>
+                        </div>
+                    `);
+            })
+            .on('mouseleave', () => {
+                tooltip.classed('visible', false);
+            });
+
+            // Update positions on tick
+            simulation.on('tick', () => {
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+
+                node.attr('transform', d => `translate(${d.x},${d.y})`);
+            });
+        }
+
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+
+        function dragended(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+        }
+
+        // Refresh all data
+        async function refreshAll() {
+            await Promise.all([
+                loadStats(),
+                loadL1(),
+                loadL2Vector(),
+                loadL3Facts(),
+                loadL3Links(),
+                loadGraph(),
+            ]);
+        }
+
+        // Initial load
+        refreshAll();
+        
+        // Auto-refresh every 10 seconds
+        setInterval(refreshAll, 10000);
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            loadGraph();
+        });
+    </script>
+</body>
+</html>

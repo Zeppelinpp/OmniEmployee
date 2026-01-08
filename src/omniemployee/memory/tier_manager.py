@@ -70,7 +70,6 @@ class TierManager:
         self._running = False
         self._cleanup_task: asyncio.Task | None = None
         self._consolidation_task: asyncio.Task | None = None
-        self._l3_available = False
         
         # Optional LLM callback for consolidation
         self._consolidate_callback: Callable[[list[str]], Awaitable[str]] | None = None
@@ -401,11 +400,17 @@ class TierManager:
         l1_stats = self.l1.get_stats()
         l2_vector_stats = self.l2_vector.get_stats()
         l2_graph_stats = self.l2_graph.get_stats()
-        l3_stats = await self.l3.get_stats()
         
-        return {
+        result = {
             "l1": l1_stats,
             "l2_vector": l2_vector_stats,
             "l2_graph": l2_graph_stats,
-            "l3": l3_stats,
         }
+        
+        if self._l3_available:
+            l3_stats = await self.l3.get_stats()
+            result["l3"] = l3_stats
+        else:
+            result["l3"] = {"status": "unavailable"}
+        
+        return result
