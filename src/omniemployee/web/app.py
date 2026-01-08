@@ -1,6 +1,6 @@
 """Memory System Web Visualizer.
 
-A FastAPI app to visualize BIEM memory contents with D3.js graph.
+A FastAPI app to visualize BIEM memory and knowledge contents with D3.js graph.
 """
 
 from __future__ import annotations
@@ -15,17 +15,23 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from src.omniemployee.memory import MemoryManager, MemoryConfig
 from src.omniemployee.memory.storage import MilvusConfig, PostgresConfig
+from src.omniemployee.memory.knowledge import (
+    KnowledgeStore,
+    KnowledgeStoreConfig,
+)
 
 
-# Global memory manager instance
+# Global instances
 _memory: MemoryManager | None = None
+_knowledge_store: KnowledgeStore | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize and cleanup memory system."""
-    global _memory
+    """Initialize and cleanup memory and knowledge systems."""
+    global _memory, _knowledge_store
     
+    # Memory system
     config = MemoryConfig(
         milvus_config=MilvusConfig(use_lite=False),  # Use Milvus Standalone
         postgres_config=PostgresConfig(),
@@ -35,7 +41,20 @@ async def lifespan(app: FastAPI):
     await _memory.initialize()
     print("✓ Memory system connected")
     
+    # Knowledge store
+    try:
+        _knowledge_store = KnowledgeStore(KnowledgeStoreConfig())
+        await _knowledge_store.connect()
+        print("✓ Knowledge store connected")
+    except Exception as e:
+        print(f"⚠ Knowledge store not available: {e}")
+        _knowledge_store = None
+    
     yield
+    
+    if _knowledge_store:
+        await _knowledge_store.disconnect()
+        print("✓ Knowledge store shutdown")
     
     await _memory.shutdown()
     print("✓ Memory system shutdown")
@@ -243,6 +262,101 @@ async def delete_node(node_id: str):
     
     success = await _memory.delete_node(node_id)
     return {"success": success, "node_id": node_id}
+
+
+# ==================== Knowledge APIs ====================
+
+@app.get("/api/knowledge/stats")
+async def get_knowledge_stats():
+    """Get knowledge store statistics."""
+    if not _knowledge_store or not _knowledge_store.is_available():
+        return {"status": "unavailable"}
+    
+    try:
+        stats = await _knowledge_store.get_stats()
+        return stats
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/knowledge/triples")
+async def get_knowledge_triples(user_id: str = "", limit: int = 100):
+    """Get all knowledge triples."""
+    if not _knowledge_store or not _knowledge_store.is_available():
+        return {"triples": [], "message": "Knowledge store not available"}
+    
+    try:
+        triples = await _knowledge_store.get_all(user_id, limit)
+        return {
+            "triples": [
+                {
+                    "id": str(t.id),
+                    "subject": t.subject,
+                    "predicate": t.predicate,
+                    "object": t.object,
+                    "confidence": round(t.confidence, 3),
+                    "source": t.source.value,
+                    "version": t.version,
+                    "previous_values": t.previous_values,
+                    "user_id": t.user_id,
+                    "created_at": t.created_at,
+                    "updated_at": t.updated_at,
+                }
+                for t in triples
+            ]
+        }
+    except Exception as e:
+        return {"triples": [], "error": str(e)}
+
+
+@app.get("/api/knowledge/search")
+async def search_knowledge(q: str, user_id: str = "", limit: int = 20):
+    """Search knowledge triples."""
+    if not _knowledge_store or not _knowledge_store.is_available():
+        return {"triples": [], "message": "Knowledge store not available"}
+    
+    try:
+        triples = await _knowledge_store.search(q, user_id, limit)
+        return {
+            "triples": [
+                {
+                    "id": str(t.id),
+                    "subject": t.subject,
+                    "predicate": t.predicate,
+                    "object": t.object,
+                    "confidence": round(t.confidence, 3),
+                    "source": t.source.value,
+                }
+                for t in triples
+            ]
+        }
+    except Exception as e:
+        return {"triples": [], "error": str(e)}
+
+
+@app.get("/api/knowledge/history/{triple_id}")
+async def get_knowledge_history(triple_id: str, limit: int = 10):
+    """Get update history for a knowledge triple."""
+    if not _knowledge_store or not _knowledge_store.is_available():
+        return {"history": [], "message": "Knowledge store not available"}
+    
+    try:
+        history = await _knowledge_store.get_history(triple_id, limit)
+        return {
+            "history": [
+                {
+                    "id": str(h.id),
+                    "old_value": h.old_value,
+                    "new_value": h.new_value,
+                    "reason": h.reason,
+                    "confirmed": h.confirmed,
+                    "timestamp": h.timestamp,
+                }
+                for h in history
+            ]
+        }
+    except Exception as e:
+        return {"history": [], "error": str(e)}
 
 
 if __name__ == "__main__":

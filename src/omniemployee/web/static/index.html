@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BIEM Memory Visualizer</title>
+    <title>BIEM Memory & Knowledge Visualizer</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
@@ -309,6 +309,10 @@
         .type-badge.causal { background: rgba(171, 157, 242, 0.2); color: var(--accent-purple); }
         .type-badge.user { background: rgba(169, 220, 118, 0.2); color: var(--accent-green); }
         .type-badge.assistant { background: rgba(120, 220, 232, 0.2); color: var(--accent-cyan); }
+        .type-badge.user_stated { background: rgba(169, 220, 118, 0.2); color: var(--accent-green); }
+        .type-badge.user_verified { background: rgba(255, 216, 102, 0.2); color: var(--accent-yellow); }
+        .type-badge.user_correction { background: rgba(255, 97, 136, 0.2); color: var(--accent-magenta); }
+        .type-badge.conversation { background: rgba(171, 157, 242, 0.2); color: var(--accent-purple); }
 
         /* Empty State */
         .empty-state {
@@ -388,7 +392,7 @@
 </head>
 <body>
     <header class="header">
-        <h1>⧫ BIEM Memory System</h1>
+        <h1>⧫ BIEM Memory & Knowledge</h1>
         <div class="stats-bar">
             <div class="stat">
                 <span class="stat-label">L1:</span>
@@ -405,6 +409,10 @@
             <div class="stat">
                 <span class="stat-label">L3:</span>
                 <span class="stat-value" id="stat-l3">-</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Knowledge:</span>
+                <span class="stat-value" id="stat-knowledge">-</span>
             </div>
             <button class="refresh-btn" onclick="refreshAll()">↻ Refresh</button>
         </div>
@@ -436,6 +444,7 @@
                 <div class="tab" data-tab="l2">L2 Vector</div>
                 <div class="tab" data-tab="l3-facts">L3 Facts</div>
                 <div class="tab" data-tab="l3-links">L3 Links</div>
+                <div class="tab" data-tab="knowledge">Knowledge</div>
             </div>
             <div class="tab-content">
                 <div class="tab-pane active" id="tab-l1">
@@ -485,6 +494,20 @@
                                 <th>Target</th>
                                 <th>Type</th>
                                 <th>Weight</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="tab-pane" id="tab-knowledge">
+                    <table class="db-table" id="table-knowledge">
+                        <thead>
+                            <tr>
+                                <th>Subject</th>
+                                <th>Predicate</th>
+                                <th>Object</th>
+                                <th>Source</th>
+                                <th>Ver</th>
                             </tr>
                         </thead>
                         <tbody></tbody>
@@ -541,6 +564,16 @@
                     stats.l3?.status === 'unavailable' ? '—' : (stats.l3?.links_count || 0);
             } catch (e) {
                 console.error('Failed to load stats:', e);
+            }
+            
+            // Load knowledge stats
+            try {
+                const kRes = await fetch('/api/knowledge/stats');
+                const kStats = await kRes.json();
+                document.getElementById('stat-knowledge').textContent = 
+                    kStats.status === 'unavailable' ? '—' : (kStats.total_triples || 0);
+            } catch (e) {
+                document.getElementById('stat-knowledge').textContent = '—';
             }
         }
 
@@ -641,6 +674,32 @@
                 `).join('');
             } catch (e) {
                 console.error('Failed to load L3 links:', e);
+            }
+        }
+
+        // Load knowledge triples
+        async function loadKnowledge() {
+            try {
+                const res = await fetch('/api/knowledge/triples');
+                const data = await res.json();
+                const tbody = document.querySelector('#table-knowledge tbody');
+                
+                if (!data.triples || data.triples.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">${data.message || 'No knowledge learned yet'}</td></tr>`;
+                    return;
+                }
+                
+                tbody.innerHTML = data.triples.map(t => `
+                    <tr>
+                        <td title="${t.subject}">${t.subject}</td>
+                        <td title="${t.predicate}">${t.predicate.replace(/_/g, ' ')}</td>
+                        <td title="${t.object}">${t.object}</td>
+                        <td><span class="type-badge ${t.source}">${t.source}</span></td>
+                        <td>${t.version}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load knowledge:', e);
             }
         }
 
@@ -789,6 +848,7 @@
                 loadL2Vector(),
                 loadL3Facts(),
                 loadL3Links(),
+                loadKnowledge(),
                 loadGraph(),
             ]);
         }
