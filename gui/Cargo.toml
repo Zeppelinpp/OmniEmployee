@@ -1,0 +1,29 @@
+[package]
+name = "omniemployee-gui"
+version = "0.1.0"
+edition = "2021"
+authors = ["OmniEmployee Team"]
+description = "A beautiful GUI for OmniEmployee AI Assistant"
+
+[dependencies]
+# GPUI from Zed (specify the crate path within monorepo)
+gpui = { git = "https://github.com/zed-industries/zed", branch = "main", package = "gpui" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Async runtime  
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Utilities
+chrono = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+anyhow = "1.0"
+
+[features]
+default = []
