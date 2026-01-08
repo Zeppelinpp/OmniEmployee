@@ -19,6 +19,7 @@ from src.omniemployee.memory.knowledge.models import (
 
 
 # Extraction prompt template
+# Note: Use double braces {{}} to escape JSON in f-string/format
 EXTRACTION_PROMPT = """You are a knowledge extraction system. Analyze the following message and extract structured knowledge.
 
 ## Task
@@ -31,63 +32,63 @@ EXTRACTION_PROMPT = """You are a knowledge extraction system. Analyze the follow
 Input: "Claude 3.5 Sonnet has a context window of 200k tokens"
 Output:
 ```json
-{
+{{
   "is_factual": true,
   "intent": "statement",
   "triples": [
-    {"subject": "Claude 3.5 Sonnet", "predicate": "context_window", "object": "200k tokens"}
+    {{"subject": "Claude 3.5 Sonnet", "predicate": "context_window", "object": "200k tokens"}}
   ],
   "confidence": 0.95
-}
+}}
 ```
 
 Input: "Actually, GPT-4 now supports 128k context, not 32k"
 Output:
 ```json
-{
+{{
   "is_factual": true,
   "intent": "correction",
   "triples": [
-    {"subject": "GPT-4", "predicate": "context_window", "object": "128k"}
+    {{"subject": "GPT-4", "predicate": "context_window", "object": "128k"}}
   ],
   "confidence": 0.9
-}
+}}
 ```
 
 Input: "I think Python is the best language"
 Output:
 ```json
-{
+{{
   "is_factual": false,
   "intent": "opinion",
   "triples": [],
   "confidence": 0.8
-}
+}}
 ```
 
 Input: "What's the latest version of React?"
 Output:
 ```json
-{
+{{
   "is_factual": false,
   "intent": "question",
   "triples": [],
   "confidence": 0.9
-}
+}}
 ```
 
 Input: "Python was created by Guido van Rossum and released in 1991"
 Output:
 ```json
-{
+{{
   "is_factual": true,
   "intent": "statement",
   "triples": [
-    {"subject": "Python", "predicate": "created_by", "object": "Guido van Rossum"},
-    {"subject": "Python", "predicate": "release_year", "object": "1991"}
+    {{"subject": "Python", "predicate": "created_by", "object": "Guido van Rossum"}},
+    {{"subject": "Python", "predicate": "release_year", "object": "1991"}}
   ],
   "confidence": 0.95
-}
+}}
 ```
 
 ## Guidelines

@@ -728,6 +728,249 @@ graph LR
 
 ---
 
+## 知识学习系统 (Knowledge Learning)
+
+BIEM 记忆系统的扩展模块，从对话中抽取结构化知识三元组，支持知识更新和冲突检测。
+
+### 系统架构
+
+```mermaid
+graph TB
+    subgraph "对话输入"
+        USER[用户消息] --> PLUGIN[KnowledgeLearningPlugin]
+    end
+    
+    subgraph "知识抽取"
+        PLUGIN --> EXTRACT[KnowledgeExtractor<br/>LLM 驱动]
+        EXTRACT -->|JSON| TRIPLES[三元组列表]
+    end
+    
+    subgraph "冲突检测"
+        TRIPLES --> CONFLICT[ConflictDetector]
+        CONFLICT -->|无冲突| STORE[直接存储]
+        CONFLICT -->|有冲突| CONFIRM[ConfirmationManager]
+        CONFIRM -->|用户确认| UPDATE[更新知识]
+        CONFIRM -->|用户拒绝| KEEP[保留原知识]
+    end
+    
+    subgraph "存储层"
+        STORE --> PG[(PostgreSQL<br/>knowledge_triples)]
+        UPDATE --> PG
+        STORE --> MV[(Milvus<br/>向量索引)]
+        PG --> HISTORY[(knowledge_history<br/>版本历史)]
+    end
+    
+    style EXTRACT fill:#ff6188,color:#fff
+    style PG fill:#96ceb4,color:#fff
+    style MV fill:#4ecdc4,color:#fff
+```
+
+### 知识三元组 (KnowledgeTriple)
+
+知识以 `(Subject, Predicate, Object)` 三元组形式存储：
+
+```python
+@dataclass
+class KnowledgeTriple:
+    subject: str      # 主体: "GPT-4", "Python"
+    predicate: str    # 关系: "context_window", "created_by"
+    object: str       # 客体: "128k tokens", "Guido van Rossum"
+    confidence: float # 置信度: 0.0 ~ 1.0
+    source: KnowledgeSource  # 来源类型
+    version: int      # 版本号
+    previous_values: list[str]  # 历史值
+```
+
+**示例三元组**：
+| Subject | Predicate | Object |
+|---------|-----------|--------|
+| GPT-4 | context_window | 128k tokens |
+| Python | created_by | Guido van Rossum |
+| Claude 3.5 | max_output | 8k tokens |
+
+### 知识来源类型
+
+```python
+class KnowledgeSource(Enum):
+    CONVERSATION = "conversation"     # 对话中提取
+    USER_STATED = "user_stated"       # 用户明确陈述
+    USER_CORRECTION = "user_correction"  # 用户纠正
+    USER_VERIFIED = "user_verified"   # 用户确认更新
+```
+
+### 知识抽取流程
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant Plugin as KnowledgeLearningPlugin
+    participant Extractor as KnowledgeExtractor
+    participant LLM as LLM
+    participant Detector as ConflictDetector
+    participant Store as KnowledgeStore
+    
+    User->>Plugin: "Claude 3.5 Sonnet 的上下文是 200k"
+    Plugin->>Extractor: extract(message)
+    Extractor->>LLM: 分析消息，抽取三元组
+    LLM-->>Extractor: {is_factual: true, triples: [...]}
+    Extractor-->>Plugin: ExtractionResult
+    
+    Plugin->>Detector: check(triple)
+    Detector->>Store: find_potential_conflicts()
+    
+    alt 无冲突
+        Store-->>Detector: []
+        Detector-->>Plugin: ConflictResult(has_conflict=false)
+        Plugin->>Store: store(triple)
+        Plugin-->>User: 📚 Learned 1 new fact(s)
+    else 有冲突
+        Store-->>Detector: [existing_triple]
+        Detector-->>Plugin: ConflictResult(has_conflict=true)
+        Plugin-->>User: ❓ 我记得是 X，确认更新为 Y 吗？
+    end
+```
+
+### 冲突确认流程
+
+当检测到新知识与已有知识冲突时：
+
+```
+Session 1:
+─────────────────────────────────────────
+用户: GPT-4 的上下文窗口是 32k
+Agent: 📚 Learned 1 new fact(s)
+       [存储: (GPT-4, context_window, 32k)]
+
+Session 2:
+─────────────────────────────────────────
+用户: 其实 GPT-4 现在支持 128k 了
+
+Agent: ❓ 我记得 GPT-4 的 context window 是 32k tokens，
+       您确认更新为 128k 了吗？
+
+用户: 是的
+
+Agent: 好的，知识已更新！
+       [更新: (GPT-4, context_window, 128k), version=2]
+```
+
+### 跨 Session 知识召回
+
+知识在新 Session 中自动注入相关上下文：
+
+```mermaid
+graph LR
+    subgraph "新 Session"
+        Q[用户: 神经网络怎么训练?] --> SEARCH
+    end
+    
+    subgraph "知识检索"
+        SEARCH[语义搜索] --> PG[(PostgreSQL)]
+        SEARCH --> MV[(Milvus)]
+        PG --> RESULTS[相关三元组]
+        MV --> RESULTS
+    end
+    
+    subgraph "Context 注入"
+        RESULTS --> FORMAT[格式化]
+        FORMAT --> INJECT["## Learned Knowledge<br/>- (GPT-4, context_window, 128k)"]
+    end
+```
+
+### 数据库 Schema
+
+```sql
+-- 知识三元组表
+CREATE TABLE knowledge_triples (
+    id UUID PRIMARY KEY,
+    subject VARCHAR(255) NOT NULL,
+    predicate VARCHAR(255) NOT NULL,
+    object TEXT NOT NULL,
+    confidence FLOAT DEFAULT 0.8,
+    source VARCHAR(32),
+    version INT DEFAULT 1,
+    previous_values JSONB DEFAULT '[]',
+    user_id VARCHAR(64),
+    session_id VARCHAR(64),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    UNIQUE(user_id, subject, predicate)
+);
+
+-- 知识更新历史表
+CREATE TABLE knowledge_history (
+    id UUID PRIMARY KEY,
+    triple_id UUID REFERENCES knowledge_triples(id),
+    old_value TEXT,
+    new_value TEXT,
+    reason VARCHAR(64),
+    confirmed BOOLEAN DEFAULT false,
+    session_id VARCHAR(64),
+    timestamp TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### 与 Memory Context 的融合
+
+知识上下文与记忆上下文合并注入：
+
+```python
+# main.py 集成逻辑
+if memory:
+    memory_context = await memory.prepare_context(user_input)
+    context_parts.append(memory_context)
+
+if knowledge and knowledge.is_available():
+    knowledge_context = await knowledge.get_context_for_query(user_input)
+    context_parts.append(knowledge_context)
+
+agent.context.set_memory_context("\n\n".join(context_parts))
+```
+
+**最终注入格式**：
+```markdown
+## Relevant Memories
+1. [● E=0.85] 用户正在学习机器学习...
+   Entities: 机器学习, PyTorch
+
+## Learned Knowledge
+- (GPT-4, context_window, 128k tokens) [user_verified]
+- (Claude 3.5, max_output, 8k tokens) [user_stated]
+```
+
+### 配置参数
+
+```python
+@dataclass
+class KnowledgePluginConfig:
+    store_config: KnowledgeStoreConfig   # PostgreSQL 配置
+    vector_config: KnowledgeVectorConfig # Milvus 配置
+    
+    auto_store: bool = True              # 自动存储无冲突知识
+    extract_from_agent: bool = False     # 是否从 Agent 消息抽取
+    max_context_items: int = 10          # Context 中最大知识条数
+    enable_vector_search: bool = True    # 启用向量语义搜索
+    
+    user_id: str = ""                    # 用户 ID (多用户隔离)
+    session_id: str = ""                 # Session ID
+```
+
+### 环境变量
+
+```bash
+# 知识学习开关
+DISABLE_KNOWLEDGE=false
+
+# 向量搜索开关
+KNOWLEDGE_VECTOR_SEARCH=true
+
+# 用户标识
+USER_ID=default
+```
+
+---
+
 ## 附录：配置参考
 
 ### 环境变量
