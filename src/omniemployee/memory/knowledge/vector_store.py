@@ -50,6 +50,9 @@ class KnowledgeVectorStore:
         # Create collection if not exists
         if not self._client.has_collection(self.config.collection_name):
             await self._create_collection()
+        else:
+            # Load existing collection for searching
+            self._client.load_collection(self.config.collection_name)
         
         self._connected = True
     
@@ -83,6 +86,9 @@ class KnowledgeVectorStore:
             collection_name=self.config.collection_name,
             index_params=index_params
         )
+        
+        # Load collection for searching
+        self._client.load_collection(self.config.collection_name)
     
     async def disconnect(self) -> None:
         """Disconnect from Milvus."""
@@ -117,7 +123,8 @@ class KnowledgeVectorStore:
         # Generate embedding if not present
         if not triple.vector and self._encoder:
             text = triple.to_text()
-            embedding = await self._encoder.encode(text)
+            # Use generate_embedding directly (encode returns MemoryNode)
+            embedding = await self._encoder.generate_embedding(text)
             if embedding:
                 triple.vector = embedding
         
@@ -163,7 +170,7 @@ class KnowledgeVectorStore:
             return []
         
         # Generate query embedding
-        query_vector = await self._encoder.encode(query)
+        query_vector = await self._encoder.generate_embedding(query)
         if not query_vector:
             return []
         
