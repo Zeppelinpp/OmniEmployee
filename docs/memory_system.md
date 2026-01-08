@@ -432,22 +432,18 @@ async def run_interactive(agent, loop, memory):
     while True:
         user_input = get_user_input()
         
-        # 1. 召回相关记忆并注入
+        # 1. 召回相关记忆并注入（使用专用方法保证位置固定）
         if memory:
             memory_context = await memory.prepare_context(user_input)
             if memory_context:
-                # 临时追加到 system prompt
-                original_prompt = agent.context._system_prompt
-                agent.context.set_system_prompt(
-                    original_prompt + "\n\n" + memory_context
-                )
+                agent.context.set_memory_context(memory_context)
         
-        # 2. LLM 调用
+        # 2. LLM 调用（build_messages 会按固定顺序组装 sections）
         response = await loop.run_stream(user_input)
         
-        # 3. 恢复原始 system prompt
+        # 3. 清除记忆上下文
         if memory:
-            agent.context.set_system_prompt(original_prompt)
+            agent.context.clear_memory_context()
         
         # 4. 记录本轮对话到记忆
         if memory:
@@ -457,19 +453,37 @@ async def run_interactive(agent, loop, memory):
 
 ### Context 位置示意
 
+Section 顺序是固定的，由 `ContextManager.build_messages()` 保证：
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    System Prompt                         │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │ You are OmniEmployee, an AI coding assistant... │    │
+│  │ # Core Behavior Loop                            │    │
+│  │ # Skill Loading Protocol                        │    │
+│  │ # Guidelines                                    │    │
+│  │ # Workspace Information                         │    │
+│  │ # Available Tools                               │    │
 │  └─────────────────────────────────────────────────┘    │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │ ## Relevant Memories   ← 记忆注入位置            │    │
+│  │ ## Relevant Memories   ← 动态注入位置            │    │
 │  │ 1. [● E=0.85] 用户正在学习机器学习...            │    │
 │  │    Entities: 机器学习, PyTorch                   │    │
 │  │ 2. [○ E=0.62] 深度学习是机器学习的分支...        │    │
 │  │    Entities: 深度学习, 神经网络                  │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ ## Available Skills (动态添加)                   │    │
+│  │ - [○] book-flight: 航班预订技能                 │    │
+│  │ - [✓] codebase-tools: 代码工具技能              │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │ ## Loaded Skill Instructions (动态添加)         │    │
+│  │ ### Skill: codebase-tools                       │    │
+│  │ (已加载技能的详细指令...)                        │    │
 │  └─────────────────────────────────────────────────┘    │
 ├─────────────────────────────────────────────────────────┤
 │                   Conversation History                   │

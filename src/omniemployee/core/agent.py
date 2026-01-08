@@ -66,7 +66,11 @@ class Agent:
         self.context.set_system_prompt(prompt)
     
     def _load_system_prompt_template(self) -> str:
-        """Load and render the system prompt template."""
+        """Load and render the system prompt template.
+        
+        Note: skills_summary and loaded_skill_instructions are added
+        dynamically by ContextManager.build_messages() to avoid duplication.
+        """
         prompt_path = self.config.system_prompt_path or DEFAULT_PROMPT_PATH
         prompt_path = Path(prompt_path)
         
@@ -75,12 +79,11 @@ class Agent:
         
         template = prompt_path.read_text(encoding='utf-8')
         
-        # Render template with placeholders
+        # Render template with static placeholders only
+        # Skills are added dynamically by build_messages()
         return template.format(
             workspace_root=self.workspace_root,
             tools_summary=self.tools.get_tools_summary(),
-            skills_summary=self.skills.get_skills_summary(),
-            loaded_skill_instructions=""  # Will be populated dynamically
         )
     
     def _fallback_system_prompt(self) -> str:

@@ -139,11 +139,7 @@ async def run_interactive(agent: Agent, loop: AgentLoop, memory: BIEMContextPlug
             if memory:
                 memory_context = await memory.prepare_context(user_input)
                 if memory_context:
-                    # Add memory context to system prompt temporarily
-                    original_prompt = agent.context._system_prompt
-                    agent.context.set_system_prompt(
-                        original_prompt + "\n\n" + memory_context
-                    )
+                    agent.context.set_memory_context(memory_context)
 
             # Run agent with streaming
             console.print("\n[bold blue]Assistant:[/bold blue]")
@@ -155,9 +151,9 @@ async def run_interactive(agent: Agent, loop: AgentLoop, memory: BIEMContextPlug
 
             console.print("\n")
             
-            # Restore original system prompt
+            # Clear memory context after response
             if memory:
-                agent.context.set_system_prompt(original_prompt)
+                agent.context.clear_memory_context()
             
             # Record interaction to memory
             if memory:
@@ -187,8 +183,7 @@ async def run_single(agent: Agent, loop: AgentLoop, memory: BIEMContextPlugin | 
     if memory:
         memory_context = await memory.prepare_context(prompt)
         if memory_context:
-            original_prompt = agent.context._system_prompt
-            agent.context.set_system_prompt(original_prompt + "\n\n" + memory_context)
+            agent.context.set_memory_context(memory_context)
     
     result = await loop.run(prompt)
 

@@ -77,9 +77,3 @@ Working directory: {workspace_root}
 
 {tools_summary}
 
-## Available Skills
-
-{skills_summary}
-
-{loaded_skill_instructions}
-

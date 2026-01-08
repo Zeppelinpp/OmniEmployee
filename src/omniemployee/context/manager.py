@@ -27,6 +27,7 @@ class ContextManager:
         self.config = config or ContextConfig()
         self._messages: list[Message] = []
         self._system_prompt: str = ""
+        self._memory_context: str = ""  # Dynamic memory injection
         self._loaded_skills: dict[str, str] = {}  # skill_name -> full instructions
         self._skill_metadata: dict[str, dict] = {}  # skill_name -> metadata only
         self._loaded_references: dict[str, str] = {}  # "skill:ref_path" -> content (Phase 3)
@@ -52,6 +53,24 @@ class ContextManager:
         self._system_prompt = prompt
         new_tokens = len(prompt) // 4
         self._current_tokens += (new_tokens - old_tokens)
+    
+    def set_memory_context(self, context: str) -> None:
+        """Set memory context for dynamic injection.
+        
+        Memory context is injected between system prompt and skills
+        to maintain consistent section ordering.
+        """
+        old_tokens = len(self._memory_context) // 4
+        self._memory_context = context
+        new_tokens = len(context) // 4
+        self._current_tokens += (new_tokens - old_tokens)
+    
+    def clear_memory_context(self) -> None:
+        """Clear the memory context."""
+        if self._memory_context:
+            tokens = len(self._memory_context) // 4
+            self._memory_context = ""
+            self._current_tokens -= tokens
     
     def add_message(self, message: Message) -> None:
         """Add a message to the context."""
@@ -223,16 +242,29 @@ class ContextManager:
     # ==================== Context Building ====================
     
     def build_messages(self) -> list[dict]:
-        """Build messages list for LLM API call."""
+        """Build messages list for LLM API call.
+        
+        Section order (fixed for agent stability):
+        1. System prompt (core instructions, workspace, tools)
+        2. Memory context (relevant memories from BIEM)
+        3. Skills summary (available skills list)
+        4. Loaded skill instructions (detailed instructions)
+        """
         messages = []
         
-        # Build system message with skills
+        # Build system message with consistent section ordering
         system_content = self._system_prompt
         
+        # Memory context (injected between base prompt and skills)
+        if self._memory_context:
+            system_content += f"\n\n{self._memory_context}"
+        
+        # Skills summary
         skill_summary = self.get_skill_summary()
         if skill_summary:
             system_content += f"\n\n{skill_summary}"
         
+        # Loaded skill instructions
         skill_instructions = self.get_loaded_skill_instructions()
         if skill_instructions:
             system_content += f"\n\n{skill_instructions}"
