@@ -2,7 +2,7 @@
 //!
 //! A faithful implementation of the Monokai Pro color scheme.
 
-use gpui::{rgb, Hsla};
+use gpui::Hsla;
 
 /// Monokai Pro color palette
 pub mod colors {

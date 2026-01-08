@@ -19,6 +19,7 @@ A beautiful desktop GUI for OmniEmployee AI Assistant, built with [GPUI](https:/
 | `/memory` | Show memory system statistics |
 | `/knowledge` | Show learned knowledge triples |
 | `/clear` | Clear conversation history |
+| `/reconnect` | Reconnect to the backend API |
 | `/config <key> <value>` | Update configuration |
 
 ### Configuration Keys
@@ -80,11 +81,45 @@ gui/
 
 ## Integration with OmniEmployee
 
-The GUI is designed to work with the OmniEmployee Python backend:
+The GUI is designed to work with the OmniEmployee Python backend. **Full setup:**
 
-1. Start the backend API: `uv run uvicorn src.omniemployee.web.app:app --port 8765`
-2. Run the GUI: `cd gui && cargo run`
-3. The GUI will communicate with `http://localhost:8765`
+### 1. Start the Backend API
+
+```bash
+# From the project root
+uv run uvicorn src.omniemployee.web.app:app --port 8765
+```
+
+This starts the FastAPI server with:
+- Chat API (`/api/chat`) - Real conversation with the agent
+- Memory API (`/api/memory/context`, `/api/stats`) - BIEM memory system
+- Knowledge API (`/api/knowledge/triples`, `/api/knowledge/stats`) - Knowledge triples
+- Agent Info API (`/api/agent/info`) - Model, skills, tools info
+
+### 2. Run the GUI
+
+```bash
+cd gui && cargo run --release
+```
+
+### 3. Interact
+
+- Type messages to chat with the AI agent
+- The sidebar shows real Tool Use, Memory, and Knowledge data
+- Click panel headers to expand/collapse
+- Use `/commands` for quick actions
+
+### API Endpoints Used
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/chat` | Send message, get response with tool calls |
+| `GET /api/agent/info` | Get model, provider, skills, tools |
+| `GET /api/memory/context` | Retrieve relevant memories |
+| `GET /api/stats` | Memory system statistics |
+| `GET /api/knowledge/triples` | All knowledge triples |
+| `GET /api/knowledge/stats` | Knowledge statistics |
+| `POST /api/chat/clear` | Clear conversation |
 
 ## License
 

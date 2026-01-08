@@ -13,3 +13,6 @@ wheels/
 
 milvus_biem.db
 volumes/
+
+# rust build
+gui/target/

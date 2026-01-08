@@ -314,22 +314,37 @@ class KnowledgeStore:
         user_id: str = "",
         limit: int = 10,
     ) -> list[KnowledgeTriple]:
-        """Full-text search on subject and object."""
+        """Full-text search on subject and object. If user_id is empty, search all."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT *, 
-                       ts_rank(to_tsvector('english', subject || ' ' || object),
-                               plainto_tsquery('english', $1)) as rank
-                FROM knowledge_triples
-                WHERE to_tsvector('english', subject || ' ' || object) 
-                      @@ plainto_tsquery('english', $1)
-                  AND user_id = $2
-                ORDER BY rank DESC
-                LIMIT $3
-                """,
-                query, user_id, limit
-            )
+            if user_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT *, 
+                           ts_rank(to_tsvector('english', subject || ' ' || object),
+                                   plainto_tsquery('english', $1)) as rank
+                    FROM knowledge_triples
+                    WHERE to_tsvector('english', subject || ' ' || object) 
+                          @@ plainto_tsquery('english', $1)
+                      AND user_id = $2
+                    ORDER BY rank DESC
+                    LIMIT $3
+                    """,
+                    query, user_id, limit
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT *, 
+                           ts_rank(to_tsvector('english', subject || ' ' || object),
+                                   plainto_tsquery('english', $1)) as rank
+                    FROM knowledge_triples
+                    WHERE to_tsvector('english', subject || ' ' || object) 
+                          @@ plainto_tsquery('english', $1)
+                    ORDER BY rank DESC
+                    LIMIT $2
+                    """,
+                    query, limit
+                )
             return [self._row_to_triple(row) for row in rows]
     
     async def get_recent(
@@ -337,17 +352,27 @@ class KnowledgeStore:
         user_id: str = "",
         limit: int = 20,
     ) -> list[KnowledgeTriple]:
-        """Get recently updated triples."""
+        """Get recently updated triples. If user_id is empty, get all."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT * FROM knowledge_triples
-                WHERE user_id = $1
-                ORDER BY updated_at DESC
-                LIMIT $2
-                """,
-                user_id, limit
-            )
+            if user_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM knowledge_triples
+                    WHERE user_id = $1
+                    ORDER BY updated_at DESC
+                    LIMIT $2
+                    """,
+                    user_id, limit
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM knowledge_triples
+                    ORDER BY updated_at DESC
+                    LIMIT $1
+                    """,
+                    limit
+                )
             return [self._row_to_triple(row) for row in rows]
     
     async def get_all(
@@ -355,17 +380,28 @@ class KnowledgeStore:
         user_id: str = "",
         limit: int = 100,
     ) -> list[KnowledgeTriple]:
-        """Get all triples for a user."""
+        """Get all triples for a user. If user_id is empty, return all triples."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT * FROM knowledge_triples
-                WHERE user_id = $1
-                ORDER BY subject, predicate
-                LIMIT $2
-                """,
-                user_id, limit
-            )
+            if user_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM knowledge_triples
+                    WHERE user_id = $1
+                    ORDER BY subject, predicate
+                    LIMIT $2
+                    """,
+                    user_id, limit
+                )
+            else:
+                # Return all triples if no user_id specified
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM knowledge_triples
+                    ORDER BY subject, predicate
+                    LIMIT $1
+                    """,
+                    limit
+                )
             return [self._row_to_triple(row) for row in rows]
     
     # ==================== Conflict Detection ====================
