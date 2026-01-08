@@ -14,11 +14,12 @@ dependencies = [
     "tavily-python>=0.3.0",
     "ollama>=0.6.1",
     "spacy>=3.8.11",
-    "pymilvus[lite]>=2.6.6",
     "fastapi>=0.128.0",
     "uvicorn>=0.40.0",
     "milvus-lite>=2.5.1",
     "networkx>=3.6.1",
+    "pymilvus>=2.6.6",
+    "asyncpg>=0.31.0",
 ]
 
 [project.optional-dependencies]

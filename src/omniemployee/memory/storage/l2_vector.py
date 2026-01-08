@@ -24,7 +24,7 @@ class MilvusConfig:
     index_type: str = "IVF_FLAT"
     metric_type: str = "COSINE"
     nlist: int = 128                # IVF clustering parameter
-    use_lite: bool = True           # Use Milvus Lite for local dev
+    use_lite: bool = False          # Use Milvus Standalone (Docker)
 
 
 class L2VectorStorage(VectorStorageBackend):

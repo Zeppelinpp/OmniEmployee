@@ -12,3 +12,4 @@ wheels/
 .env
 
 milvus_biem.db
+volumes/

@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     global _memory
     
     config = MemoryConfig(
-        milvus_config=MilvusConfig(use_lite=True),
+        milvus_config=MilvusConfig(use_lite=False),  # Use Milvus Standalone
         postgres_config=PostgresConfig(),
         auto_start_tasks=False,
     )

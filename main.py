@@ -25,7 +25,7 @@ def create_memory_config() -> MemoryConfig:
     """Create memory configuration from environment."""
     milvus_config = MilvusConfig(
         collection_name=os.getenv("MILVUS_COLLECTION", "biem_memories"),
-        use_lite=os.getenv("MILVUS_USE_LITE", "true").lower() == "true",
+        use_lite=os.getenv("MILVUS_USE_LITE", "false").lower() == "true",
     )
     
     postgres_config = PostgresConfig(

@@ -1226,6 +1226,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
+    { name = "asyncpg" },
     { name = "fastapi" },
     { name = "litellm" },
     { name = "milvus-lite" },
@@ -1258,6 +1259,7 @@ memory-nlp = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=23.0.0" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "asyncpg", marker = "extra == 'memory'", specifier = ">=0.29.0" },
     { name = "fastapi", specifier = ">=0.128.0" },
     { name = "litellm", specifier = ">=1.0.0" },
@@ -1266,8 +1268,8 @@ requires-dist = [
     { name = "networkx", marker = "extra == 'memory'", specifier = ">=3.0" },
     { name = "ollama", specifier = ">=0.6.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pymilvus", specifier = ">=2.6.6" },
     { name = "pymilvus", marker = "extra == 'memory'", specifier = ">=2.3.0" },
-    { name = "pymilvus", extras = ["lite"], specifier = ">=2.6.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
