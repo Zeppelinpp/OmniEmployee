@@ -115,6 +115,9 @@ class MemoryManager:
         # Connect storage backends
         await self._tier.connect_all()
         
+        # Set L3 storage on router for link persistence
+        self._router.set_l3_storage(self._l3, self._tier._l3_available)
+        
         # Initialize encoder
         await self._encoder.initialize()
         

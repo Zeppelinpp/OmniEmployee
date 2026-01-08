@@ -13,6 +13,7 @@ from enum import Enum
 
 from src.omniemployee.memory.models import MemoryNode, Link, LinkType
 from src.omniemployee.memory.storage.l2_graph import L2GraphStorage
+from src.omniemployee.memory.storage.l3_crystal import L3CrystalStorage
 
 
 class LinkStrategy(str, Enum):
@@ -48,6 +49,8 @@ class AssociationRouter:
     - Temporal links (based on creation time proximity)
     - Semantic links (based on embedding similarity)
     - Causal links (explicitly created or inferred)
+    
+    Links are persisted to L3 storage (if available) for recovery on restart.
     """
     
     def __init__(
@@ -58,12 +61,21 @@ class AssociationRouter:
         self.graph = graph_storage
         self.config = config or RouterConfig()
         
+        # Optional L3 storage for link persistence
+        self._l3: L3CrystalStorage | None = None
+        self._l3_available = False
+        
         # Recent nodes for temporal linking
         self._recent_nodes: list[tuple[str, float]] = []  # (node_id, timestamp)
         self._max_recent = 50
         
         # Optional LLM callback for causal inference
         self._infer_causal_callback: Callable[[str, str], Awaitable[float]] | None = None
+    
+    def set_l3_storage(self, l3: L3CrystalStorage, available: bool = True) -> None:
+        """Set L3 storage for link persistence."""
+        self._l3 = l3
+        self._l3_available = available
     
     def set_causal_inference_callback(
         self,
@@ -131,10 +143,23 @@ class AssociationRouter:
                 link_type=LinkType.TEMPORAL,
                 weight=self._temporal_weight(current_time, target_ts)
             )
-            await self.graph.add_link(link)
+            await self._persist_link(link)
             links.append(link)
         
         return links
+    
+    async def _persist_link(self, link: Link) -> None:
+        """Persist link to both graph and L3 storage."""
+        # Add to in-memory graph
+        await self.graph.add_link(link)
+        
+        # Persist to L3 if available
+        if self._l3_available and self._l3:
+            try:
+                await self._l3.store_link(link)
+            except Exception as e:
+                # Log but don't fail - graph already has the link
+                print(f"[Router] Failed to persist link to L3: {e}")
     
     def _temporal_weight(self, time_a: float, time_b: float) -> float:
         """Calculate temporal link weight based on time difference.
@@ -180,7 +205,7 @@ class AssociationRouter:
                 link_type=LinkType.SEMANTIC,
                 weight=sim
             )
-            await self.graph.add_link(link)
+            await self._persist_link(link)
             links.append(link)
         
         return links
@@ -224,7 +249,7 @@ class AssociationRouter:
             link_type=LinkType.CAUSAL,
             weight=confidence
         )
-        await self.graph.add_link(link)
+        await self._persist_link(link)
         return link
     
     async def infer_causal_links(

@@ -97,10 +97,31 @@ class TierManager:
         try:
             await self.l3.connect()
             self._l3_available = True
+            
+            # Restore graph links from L3
+            await self._restore_graph_from_l3()
+            
         except Exception as e:
             print(f"[Memory] L3 (PostgreSQL) not available: {e}")
             print("[Memory] Continuing without L3 storage...")
             self._l3_available = False
+    
+    async def _restore_graph_from_l3(self) -> None:
+        """Restore graph links from L3 persistent storage."""
+        if not self._l3_available:
+            return
+        
+        try:
+            links = await self.l3.get_all_links(limit=10000)
+            restored = 0
+            for link in links:
+                await self.l2_graph.add_link(link)
+                restored += 1
+            
+            if restored > 0:
+                print(f"[Memory] Restored {restored} links from L3 to graph")
+        except Exception as e:
+            print(f"[Memory] Failed to restore graph links: {e}")
     
     async def disconnect_all(self) -> None:
         """Disconnect all storage backends."""

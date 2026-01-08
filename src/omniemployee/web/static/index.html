@@ -8,21 +8,24 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
+        /* Monokai Pro Color Scheme */
         :root {
-            --bg-primary: #0a0a0f;
-            --bg-secondary: #12121a;
-            --bg-tertiary: #1a1a24;
-            --border: #2a2a3a;
-            --text-primary: #e8e8f0;
-            --text-secondary: #8888a0;
-            --text-muted: #555566;
-            --accent-cyan: #00d4ff;
-            --accent-magenta: #ff00aa;
-            --accent-green: #00ff88;
-            --accent-orange: #ff8800;
-            --energy-high: #00ff88;
-            --energy-mid: #ffcc00;
-            --energy-low: #ff4444;
+            --bg-primary: #2d2a2e;
+            --bg-secondary: #221f22;
+            --bg-tertiary: #403e41;
+            --border: #5b595c;
+            --text-primary: #fcfcfa;
+            --text-secondary: #c1c0c0;
+            --text-muted: #727072;
+            --accent-cyan: #78dce8;
+            --accent-magenta: #ff6188;
+            --accent-green: #a9dc76;
+            --accent-orange: #fc9867;
+            --accent-yellow: #ffd866;
+            --accent-purple: #ab9df2;
+            --energy-high: #a9dc76;
+            --energy-mid: #ffd866;
+            --energy-low: #ff6188;
         }
 
         * {
@@ -52,7 +55,7 @@
         .header h1 {
             font-size: 1.5rem;
             font-weight: 600;
-            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-magenta));
+            background: linear-gradient(135deg, var(--accent-yellow), var(--accent-orange));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -140,7 +143,7 @@
 
         .link.temporal { stroke: var(--accent-orange); }
         .link.semantic { stroke: var(--accent-cyan); }
-        .link.causal { stroke: var(--accent-magenta); }
+        .link.causal { stroke: var(--accent-purple); }
 
         /* Tooltip */
         .tooltip {
@@ -301,11 +304,11 @@
             font-weight: 500;
         }
 
-        .type-badge.temporal { background: rgba(255, 136, 0, 0.2); color: var(--accent-orange); }
-        .type-badge.semantic { background: rgba(0, 212, 255, 0.2); color: var(--accent-cyan); }
-        .type-badge.causal { background: rgba(255, 0, 170, 0.2); color: var(--accent-magenta); }
-        .type-badge.user { background: rgba(0, 255, 136, 0.2); color: var(--accent-green); }
-        .type-badge.assistant { background: rgba(0, 212, 255, 0.2); color: var(--accent-cyan); }
+        .type-badge.temporal { background: rgba(252, 152, 103, 0.2); color: var(--accent-orange); }
+        .type-badge.semantic { background: rgba(120, 220, 232, 0.2); color: var(--accent-cyan); }
+        .type-badge.causal { background: rgba(171, 157, 242, 0.2); color: var(--accent-purple); }
+        .type-badge.user { background: rgba(169, 220, 118, 0.2); color: var(--accent-green); }
+        .type-badge.assistant { background: rgba(120, 220, 232, 0.2); color: var(--accent-cyan); }
 
         /* Empty State */
         .empty-state {
