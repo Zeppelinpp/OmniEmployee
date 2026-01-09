@@ -584,15 +584,15 @@ style L3_C fill:#96ceb4
 sequenceDiagram
   participant App as FastAPI Lifespan
   participant Agent as Agent
-  participant Loop as AgentLoop
+  participant ALoop as AgentLoop
   participant LLM as LLMProvider
   participant Memory as MemoryManager
   participant Knowledge as KnowledgeLearningPlugin
 
   Note over App,Knowledge: 1. 初始化 Agent 和 Loop
   App->>Agent: Agent(config)
-  App->>Loop: AgentLoop(agent, config)
-  Loop->>LLM: LLMProvider(config)
+  App->>ALoop: AgentLoop(agent, config)
+  ALoop->>LLM: LLMProvider(config)
 
   Note over App,Memory: 2. 初始化记忆系统
   App->>Memory: BIEMContextPlugin(config)
@@ -601,7 +601,7 @@ sequenceDiagram
 
   Note over App,Memory: 3. 配置 LLM Callbacks
   App->>Memory: _setup_memory_llm_callbacks(memory, llm)
-  Note right of Memory: 设置 consolidation_callback<br/>使用 memory_consolidation.md
+  Note right of Memory: 设置 consolidation_callback\n使用 memory_consolidation.md
 
   Note over App,Knowledge: 4. 初始化知识系统
   App->>Knowledge: KnowledgeLearningPlugin(config)
