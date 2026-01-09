@@ -16,3 +16,7 @@ volumes/
 
 # rust build
 gui/target/
+
+.omniemployee/*
+.pytest_cache/
+volumes/
