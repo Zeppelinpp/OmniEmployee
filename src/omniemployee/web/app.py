@@ -152,7 +152,7 @@ def _setup_memory_llm_callbacks(memory: MemoryManager, llm: LLMProvider) -> None
         except Exception as e:
             # Fallback to simple concatenation
             print(f"[Memory] LLM consolidation failed: {e}")
-            return f"[Consolidated from {len(contents)} memories]\n" + contents[0]
+            return contents[0]
     
     # Set the consolidation callback
     memory.set_consolidation_callback(consolidate_memories)
