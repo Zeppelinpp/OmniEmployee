@@ -19,4 +19,5 @@ gui/target/
 
 .omniemployee/*
 .pytest_cache/
+.claude/
 volumes/

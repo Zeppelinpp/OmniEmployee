@@ -32,12 +32,19 @@ class L2GraphStorage(GraphStorageBackend):
     
     Manages temporal, semantic, and causal links between memory nodes.
     Supports spreading activation for associative recall.
+    Supports multi-user isolation via user_id on nodes.
     """
     
     def __init__(self, config: GraphConfig | None = None):
         self.config = config or GraphConfig()
         self._graph: nx.DiGraph = nx.DiGraph()
         self._connected = False
+    
+    def _get_user_nodes(self, user_id: str = "") -> set[str]:
+        """Get node IDs belonging to a specific user. Empty user_id returns all."""
+        if not user_id:
+            return set(self._graph.nodes())
+        return {n for n in self._graph.nodes() if self._graph.nodes[n].get("user_id", "") == user_id}
     
     async def connect(self) -> None:
         """Initialize graph, loading from persistence if available."""
@@ -53,10 +60,13 @@ class L2GraphStorage(GraphStorageBackend):
             await self._save_to_file(Path(self.config.persist_path))
         self._connected = False
     
-    async def add_node(self, node_id: str) -> None:
+    async def add_node(self, node_id: str, user_id: str = "") -> None:
         """Add a node to the graph (without edges)."""
         if not self._graph.has_node(node_id):
-            self._graph.add_node(node_id, created_at=time.time())
+            self._graph.add_node(node_id, created_at=time.time(), user_id=user_id)
+        elif user_id and not self._graph.nodes[node_id].get("user_id"):
+            # Update user_id if not set
+            self._graph.nodes[node_id]["user_id"] = user_id
     
     async def remove_node(self, node_id: str) -> bool:
         """Remove a node and all its edges."""
@@ -66,11 +76,11 @@ class L2GraphStorage(GraphStorageBackend):
             return True
         return False
     
-    async def add_link(self, link: Link) -> None:
+    async def add_link(self, link: Link, user_id: str = "") -> None:
         """Add a directed link between nodes."""
-        # Ensure nodes exist
-        await self.add_node(link.source_id)
-        await self.add_node(link.target_id)
+        # Ensure nodes exist with user_id
+        await self.add_node(link.source_id, user_id)
+        await self.add_node(link.target_id, user_id)
         
         # Check edge limit
         out_degree = self._graph.out_degree(link.source_id)
@@ -167,20 +177,25 @@ class L2GraphStorage(GraphStorageBackend):
         self,
         start_ids: list[str],
         max_hops: int = 2,
-        decay_factor: float = 0.5
+        decay_factor: float = 0.5,
+        user_id: str = ""
     ) -> dict[str, float]:
         """Perform spreading activation from starting nodes.
         
         Simulates activation spreading through the network.
         Each hop, activation decays by decay_factor.
+        Only spreads within nodes belonging to the same user_id.
         
         Returns:
             Dict of {node_id: activation_score}
         """
         activation: dict[str, float] = defaultdict(float)
         
+        # Get valid nodes for this user
+        valid_nodes = self._get_user_nodes(user_id)
+        
         # Initialize starting nodes with activation 1.0
-        current_wave = {node_id: 1.0 for node_id in start_ids if self._graph.has_node(node_id)}
+        current_wave = {node_id: 1.0 for node_id in start_ids if node_id in valid_nodes}
         
         for node_id, score in current_wave.items():
             activation[node_id] = max(activation[node_id], score)
@@ -189,8 +204,10 @@ class L2GraphStorage(GraphStorageBackend):
             next_wave: dict[str, float] = {}
             
             for node_id, score in current_wave.items():
-                # Spread to neighbors
+                # Spread to neighbors (only within same user's nodes)
                 for neighbor_id in self._graph.successors(node_id):
+                    if neighbor_id not in valid_nodes:
+                        continue
                     edge = self._graph.get_edge_data(node_id, neighbor_id)
                     weight = edge.get("weight", 1.0)
                     

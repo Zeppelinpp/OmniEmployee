@@ -74,6 +74,8 @@ class MemoryManager:
     - Recalling relevant memories (two-stage: graph spread + vector refine)
     - Recording events with feedback
     - Managing conflicts
+    
+    Supports multi-user isolation via user_id parameter.
     """
     
     def __init__(self, config: MemoryConfig | None = None):
@@ -106,6 +108,15 @@ class MemoryManager:
         
         self._initialized = False
         self._pending_conflicts: list[DissonanceSignal] = []
+        self._current_user_id: str = ""  # Current user context
+    
+    def set_user_id(self, user_id: str) -> None:
+        """Set the current user context for memory operations."""
+        self._current_user_id = user_id
+    
+    def get_user_id(self) -> str:
+        """Get the current user context."""
+        return self._current_user_id
     
     async def initialize(self) -> None:
         """Initialize all components and connect to backends."""
@@ -139,7 +150,8 @@ class MemoryManager:
         content: str,
         source: str = "user",
         importance: float | None = None,
-        metadata: dict | None = None
+        metadata: dict | None = None,
+        user_id: str = ""
     ) -> tuple[MemoryNode, list[DissonanceSignal]]:
         """Ingest new content into the memory system.
         
@@ -148,11 +160,15 @@ class MemoryManager:
             source: Origin of the content (user, tool, agent, etc.)
             importance: Optional explicit importance (0-1)
             metadata: Optional additional metadata
+            user_id: User ID for isolation (uses current user if empty)
         
         Returns:
             Tuple of (created node, list of conflict signals)
         """
         await self._ensure_initialized()
+        
+        # Use provided user_id or current context
+        effective_user_id = user_id or self._current_user_id
         
         # Encode content into a node
         node = await self._encoder.encode(
@@ -162,6 +178,9 @@ class MemoryManager:
             tags=metadata.get("tags", []) if metadata else []
         )
         
+        # Set user_id on the node
+        node.user_id = effective_user_id
+        
         # Estimate initial energy
         node.energy = await self._energy.estimate_initial_energy(
             content,
@@ -169,8 +188,8 @@ class MemoryManager:
         )
         node.initial_energy = node.energy
         
-        # Check for conflicts with existing memories
-        existing_similar = await self._find_similar_nodes(node.vector, limit=10)
+        # Check for conflicts with existing memories (within same user)
+        existing_similar = await self._find_similar_nodes(node.vector, limit=10, user_id=effective_user_id)
         existing_nodes = [n for n, _ in existing_similar]
         
         conflicts = await self._conflict.check_conflicts(node, existing_nodes)
@@ -179,8 +198,8 @@ class MemoryManager:
         # Store the node
         await self._tier.store(node)
         
-        # Establish links
-        await self._router.route_new_node(node, existing_nodes)
+        # Establish links (with user_id for graph)
+        await self._router.route_new_node(node, existing_nodes, user_id=effective_user_id)
         
         return node, conflicts
     
@@ -189,7 +208,8 @@ class MemoryManager:
         query: str,
         top_k: int | None = None,
         use_spreading: bool = True,
-        filters: dict | None = None
+        filters: dict | None = None,
+        user_id: str = ""
     ) -> list[MemoryNode]:
         """Recall relevant memories using two-stage retrieval.
         
@@ -201,11 +221,15 @@ class MemoryManager:
             top_k: Number of results (defaults to config)
             use_spreading: Whether to use spreading activation
             filters: Optional filters (e.g., {"energy": {"$gte": 0.3}})
+            user_id: User ID for isolation (uses current user if empty)
         
         Returns:
             List of relevant MemoryNode objects
         """
         await self._ensure_initialized()
+        
+        # Use provided user_id or current context
+        effective_user_id = user_id or self._current_user_id
         
         k = top_k or self.config.default_recall_limit
         
@@ -214,17 +238,18 @@ class MemoryManager:
         
         if not query_vector or all(v == 0 for v in query_vector):
             # Fallback to L1 working memory if encoding fails
-            return await self._l1.get_top_k(k)
+            return await self._l1.get_top_k(k, user_id=effective_user_id)
         
-        # Stage 1: Initial vector search
+        # Stage 1: Initial vector search (filtered by user_id)
         initial_results = await self._l2_vector.search_by_vector(
             query_vector,
             top_k=k * 2,  # Get more for spreading
-            filters=filters
+            filters=filters,
+            user_id=effective_user_id
         )
         
         if not initial_results:
-            return await self._l1.get_top_k(k)
+            return await self._l1.get_top_k(k, user_id=effective_user_id)
         
         # Stage 2: Spreading activation (if enabled)
         if use_spreading:
@@ -233,7 +258,8 @@ class MemoryManager:
             activation_scores = await self._l2_graph.spread_activation(
                 initial_ids,
                 max_hops=self.config.spreading_activation_hops,
-                decay_factor=self.config.spreading_decay_factor
+                decay_factor=self.config.spreading_decay_factor,
+                user_id=effective_user_id
             )
             
             # Combine vector similarity with activation scores
@@ -271,12 +297,13 @@ class MemoryManager:
             # Just return vector search results
             return [n for n, _ in initial_results[:k]]
     
-    async def get_context(self, current_input: str, limit: int = 5) -> str:
+    async def get_context(self, current_input: str, limit: int = 5, user_id: str = "") -> str:
         """Get formatted context for LLM prompt injection.
         
         Args:
             current_input: Current user input/task
             limit: Maximum memories to include
+            user_id: User ID for isolation (uses current user if empty)
         
         Returns:
             Formatted string of relevant memories
@@ -284,7 +311,7 @@ class MemoryManager:
         await self._ensure_initialized()
         
         # Get relevant memories
-        memories = await self.recall(current_input, top_k=limit)
+        memories = await self.recall(current_input, top_k=limit, user_id=user_id)
         
         if not memories:
             return ""
@@ -414,10 +441,11 @@ class MemoryManager:
         await self._router.remove_node_links(node_id)
         return await self._tier.delete(node_id)
     
-    async def get_working_memory(self, limit: int = 10) -> list[MemoryNode]:
+    async def get_working_memory(self, limit: int = 10, user_id: str = "") -> list[MemoryNode]:
         """Get nodes currently in working memory (L1)."""
         await self._ensure_initialized()
-        return await self._l1.get_top_k(limit)
+        effective_user_id = user_id or self._current_user_id
+        return await self._l1.get_top_k(limit, user_id=effective_user_id)
     
     async def search_facts(self, query: str, limit: int = 10) -> list[CrystalFact]:
         """Search consolidated facts in L3."""
@@ -434,10 +462,12 @@ class MemoryManager:
     async def _find_similar_nodes(
         self,
         vector: list[float],
-        limit: int = 10
+        limit: int = 10,
+        user_id: str = ""
     ) -> list[tuple[MemoryNode, float]]:
         """Find nodes similar to a given vector."""
-        return await self._l2_vector.search_by_vector(vector, top_k=limit)
+        effective_user_id = user_id or self._current_user_id
+        return await self._l2_vector.search_by_vector(vector, top_k=limit, user_id=effective_user_id)
     
     async def get_stats(self) -> dict[str, Any]:
         """Get comprehensive statistics."""

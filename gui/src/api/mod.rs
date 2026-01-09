@@ -131,10 +131,37 @@ pub struct UserSwitchResponse {
     pub user_id: String,
 }
 
+/// Context memory item from stream
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextMemory {
+    pub id: String,
+    pub content: String,
+    pub energy: f32,
+    pub tier: String,
+}
+
+/// Context knowledge item from stream
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextKnowledge {
+    pub id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub confidence: f32,
+    pub source: String,
+}
+
 /// Stream event types from SSE
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
+    #[serde(rename = "context")]
+    Context {
+        #[serde(default)]
+        memories: Vec<ContextMemory>,
+        #[serde(default)]
+        knowledge: Vec<ContextKnowledge>,
+    },
     #[serde(rename = "chunk")]
     Chunk { content: String },
     #[serde(rename = "tool_start")]
@@ -218,19 +245,22 @@ impl ApiClient {
         Ok(response)
     }
 
-    /// Get memory context for a query (blocking)
-    pub fn get_memory_context(&self, query: &str, limit: usize) -> Result<MemoryContextResponse> {
+    /// Get memory context for a query (blocking, user-specific)
+    pub fn get_memory_context(&self, query: &str, limit: usize, user_id: &str) -> Result<MemoryContextResponse> {
         let url = format!(
-            "{}/api/memory/context?query={}&limit={}",
-            self.base_url, query, limit
+            "{}/api/memory/context?query={}&limit={}&user_id={}",
+            self.base_url, 
+            urlencoding::encode(query), 
+            limit,
+            urlencoding::encode(user_id)
         );
         let response = self.client().get(&url).send()?.json()?;
         Ok(response)
     }
 
-    /// Get memory statistics (blocking)
-    pub fn get_memory_stats(&self) -> Result<MemoryStats> {
-        let url = format!("{}/api/stats", self.base_url);
+    /// Get memory statistics (blocking, user-specific)
+    pub fn get_memory_stats(&self, user_id: &str) -> Result<MemoryStats> {
+        let url = format!("{}/api/stats?user_id={}", self.base_url, urlencoding::encode(user_id));
         let response = self.client().get(&url).send()?.json()?;
         Ok(response)
     }

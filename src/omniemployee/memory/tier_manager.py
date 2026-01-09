@@ -33,12 +33,13 @@ class TierConfig:
     l2_stale_days: int = 30             # Days after which L2 nodes may be archived
     
     # Consolidation
-    consolidation_threshold: int = 5    # Min cluster size for consolidation
-    consolidation_similarity: float = 0.85  # Min similarity for clustering
+    consolidation_threshold: int = 3    # Min cluster size for consolidation (lowered)
+    consolidation_similarity: float = 0.75  # Min similarity for clustering (lowered)
+    consolidation_scan_limit: int = 100  # Max nodes to scan from L2 for consolidation
     
     # Background tasks
     cleanup_interval: float = 300.0     # Seconds between cleanup runs
-    consolidation_interval: float = 3600.0  # Seconds between consolidation runs
+    consolidation_interval: float = 360.0  # Seconds between consolidation runs
 
 
 class TierManager:
@@ -154,8 +155,8 @@ class TierManager:
         # Always store in L2 vector for searchability
         await self.l2_vector.put(node)
         
-        # Add to graph
-        await self.l2_graph.add_node(node.id)
+        # Add to graph (with user_id for isolation)
+        await self.l2_graph.add_node(node.id, user_id=node.user_id)
         
         return node.id
     
@@ -263,12 +264,16 @@ class TierManager:
         else:
             consolidated = self._simple_consolidate(contents)
         
-        # Create crystal fact
+        # Get user_id from first node (all nodes in cluster should have same user_id)
+        user_id = nodes[0].user_id if nodes else ""
+        
+        # Create crystal fact with user_id
         fact = CrystalFact(
             content=consolidated,
             source_node_ids=[n.id for n in nodes],
             confidence=sum(n.energy for n in nodes) / len(nodes),
-            metadata={"node_count": len(nodes)}
+            metadata={"node_count": len(nodes)},
+            user_id=user_id,
         )
         
         # Store in L3 if available
@@ -407,12 +412,92 @@ class TierManager:
     async def _run_consolidation(self) -> None:
         """Execute consolidation operations.
         
-        Finds clusters of highly related, frequently accessed nodes
-        and consolidates them into crystal facts.
+        Finds clusters of highly related nodes from L2 and consolidates them
+        into crystal facts. This is a "crystallization" process that:
+        1. Merges content from similar nodes into a unified fact
+        2. Optionally removes original nodes from L2
+        3. Creates a new consolidated node in the graph
         """
-        # This is a simplified consolidation
-        # Full implementation would use clustering algorithms
-        pass
+        if not self._l3_available:
+            return
+        
+        # Get candidate nodes from L2 vector storage (not just L1)
+        candidate_nodes = await self._get_consolidation_candidates()
+        
+        if len(candidate_nodes) < self.config.consolidation_threshold:
+            return
+        
+        # Group nodes by similarity using clustering
+        clusters = await self._find_similar_clusters(candidate_nodes)
+        
+        for cluster in clusters:
+            if len(cluster) >= self.config.consolidation_threshold:
+                fact = await self._archive_to_l3(cluster)
+                if fact:
+                    print(f"[TierManager] Consolidated {len(cluster)} nodes into fact: {fact.id}")
+    
+    async def _get_consolidation_candidates(self) -> list[MemoryNode]:
+        """Get candidate nodes for consolidation from L2.
+        
+        Prioritizes nodes that have been accessed multiple times
+        or have semantic links to other nodes.
+        """
+        # Get nodes from L2 vector storage
+        try:
+            # Use a simple approach: get recent nodes from L2
+            all_nodes = await self.l2_vector.list_recent(
+                limit=self.config.consolidation_scan_limit
+            )
+            return all_nodes
+        except Exception:
+            # Fallback to L1 if L2 doesn't support list_recent
+            return await self.l1.list_all()
+    
+    async def _find_similar_clusters(
+        self, nodes: list[MemoryNode]
+    ) -> list[list[MemoryNode]]:
+        """Find clusters of similar nodes using greedy clustering."""
+        if not nodes:
+            return []
+        
+        clusters: list[list[MemoryNode]] = []
+        used = set()
+        
+        for node in nodes:
+            if node.id in used or not node.vector:
+                continue
+            
+            cluster = [node]
+            used.add(node.id)
+            
+            # Find similar nodes
+            for other in nodes:
+                if other.id in used or not other.vector:
+                    continue
+                
+                sim = self._cosine_similarity(node.vector, other.vector)
+                if sim >= self.config.consolidation_similarity:
+                    cluster.append(other)
+                    used.add(other.id)
+            
+            if len(cluster) >= 2:
+                clusters.append(cluster)
+        
+        return clusters
+    
+    def _cosine_similarity(self, vec_a: list[float], vec_b: list[float]) -> float:
+        """Calculate cosine similarity between two vectors."""
+        if len(vec_a) != len(vec_b):
+            return 0.0
+        
+        dot = sum(a * b for a, b in zip(vec_a, vec_b))
+        norm_a = sum(a * a for a in vec_a) ** 0.5
+        norm_b = sum(b * b for b in vec_b) ** 0.5
+        
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        
+        return dot / (norm_a * norm_b)
     
     # ==================== Statistics ====================
     

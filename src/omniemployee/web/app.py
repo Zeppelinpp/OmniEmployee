@@ -120,6 +120,45 @@ def create_knowledge_config(session_id: str, user_id: str = "") -> KnowledgePlug
     )
 
 
+def _load_prompt(name: str) -> str:
+    """Load a prompt template from the prompts directory."""
+    prompt_path = Path(__file__).parent.parent.parent / "prompts" / f"{name}.md"
+    if prompt_path.exists():
+        return prompt_path.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"Prompt not found: {prompt_path}")
+
+
+def _setup_memory_llm_callbacks(memory: MemoryManager, llm: LLMProvider) -> None:
+    """Set up LLM callbacks for memory system operations."""
+    
+    # Load prompt template
+    try:
+        consolidation_prompt = _load_prompt("memory_consolidation")
+    except FileNotFoundError:
+        print("⚠ Memory consolidation prompt not found, using fallback")
+        consolidation_prompt = "Consolidate these memories into one fact:\n{memories}"
+    
+    async def consolidate_memories(contents: list[str]) -> str:
+        """Use LLM to consolidate multiple memory contents into a unified fact."""
+        # Format memories for prompt
+        memories_text = "\n".join(f"- {c}" for c in contents)
+        prompt = consolidation_prompt.format(memories=memories_text)
+        
+        messages = [{"role": "user", "content": prompt}]
+        
+        try:
+            response = await llm.complete(messages)
+            return response.content.strip()
+        except Exception as e:
+            # Fallback to simple concatenation
+            print(f"[Memory] LLM consolidation failed: {e}")
+            return f"[Consolidated from {len(contents)} memories]\n" + contents[0]
+    
+    # Set the consolidation callback
+    memory.set_consolidation_callback(consolidate_memories)
+    print("✓ Memory LLM callbacks configured")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup all systems."""
@@ -156,7 +195,10 @@ async def lifespan(app: FastAPI):
             # Access memory manager through the plugin (attribute is 'memory', not '_memory')
             if hasattr(_memory_plugin, 'memory') and _memory_plugin.memory is not None:
                 _memory = _memory_plugin.memory
-                print("✓ Memory system connected")
+                # Set initial user_id from env or default
+                initial_user_id = get_current_user_id()
+                _memory.set_user_id(initial_user_id)
+                print(f"✓ Memory system connected (user: {initial_user_id})")
             else:
                 print("⚠ Memory plugin initialized but memory manager not available")
                 _memory = None
@@ -164,6 +206,10 @@ async def lifespan(app: FastAPI):
             print(f"⚠ Memory system not available: {e}")
             _memory = None
             _memory_plugin = None
+    
+    # Set up LLM callbacks for memory system after loop is initialized
+    if _memory is not None and _loop is not None:
+        _setup_memory_llm_callbacks(_memory, _loop.llm)
     
     # Knowledge store
     if os.getenv("DISABLE_KNOWLEDGE", "").lower() != "true":
@@ -288,9 +334,12 @@ async def chat(request: ChatRequest):
         await _memory_plugin.record_user_message(request.message)
         await _memory_plugin.record_assistant_message(result.response)
     
-    # Extract knowledge
+    # Extract knowledge from both user message and agent response
     if _knowledge_plugin and _knowledge_plugin.is_available():
+        # Extract from user message
         await _knowledge_plugin.process_message(request.message, role="user")
+        # Extract from agent response (search results, summaries, explanations)
+        await _knowledge_plugin.process_message(result.response, role="assistant")
     
     return ChatResponse(
         response=result.response,
@@ -304,6 +353,7 @@ async def chat_stream(message: str, session_id: str = ""):
     """Stream chat response for real-time updates (SSE format).
     
     Events:
+    - type: "context" - Memory and knowledge context used for this query (sent first)
     - type: "chunk" - Text content chunk
     - type: "tool_start" - Tool call started (sent immediately when a tool is invoked)
     - type: "tool_result" - Tool call result (sent after tool execution)
@@ -318,11 +368,22 @@ async def chat_stream(message: str, session_id: str = ""):
     async def generate():
         import json
         
-        # Build context
+        # Build context and track what was used
         context_parts = []
+        used_memories = []
+        used_knowledge = []
         
         if _memory_plugin:
             try:
+                # Get actual memory nodes used
+                memories = await _memory_plugin.get_relevant_memories(message)
+                for node in memories:
+                    used_memories.append({
+                        "id": node.id,
+                        "content": node.content[:200] + "..." if len(node.content) > 200 else node.content,
+                        "energy": node.energy,
+                        "tier": node.tier.value if hasattr(node.tier, 'value') else str(node.tier),
+                    })
                 memory_context = await _memory_plugin.prepare_context(message)
                 if memory_context:
                     context_parts.append(memory_context)
@@ -331,11 +392,25 @@ async def chat_stream(message: str, session_id: str = ""):
         
         if _knowledge_plugin and _knowledge_plugin.is_available():
             try:
+                # Get actual knowledge triples used
+                triples = await _knowledge_plugin.get_relevant_triples(message)
+                for triple in triples:
+                    used_knowledge.append({
+                        "id": str(triple.id) if triple.id else "",
+                        "subject": triple.subject,
+                        "predicate": triple.predicate,
+                        "object": triple.object,
+                        "confidence": triple.confidence,
+                        "source": triple.source.value if hasattr(triple.source, 'value') else str(triple.source),
+                    })
                 knowledge_context = await _knowledge_plugin.get_context_for_query(message)
                 if knowledge_context:
                     context_parts.append(knowledge_context)
             except Exception:
                 pass
+        
+        # Send context event first (what memory/knowledge was used for this query)
+        yield f"data: {json.dumps({'type': 'context', 'memories': used_memories, 'knowledge': used_knowledge})}\n\n"
         
         if context_parts:
             _agent.context.set_memory_context("\n\n".join(context_parts))
@@ -425,10 +500,13 @@ async def chat_stream(message: str, session_id: str = ""):
             except Exception:
                 pass
         
-        # Process knowledge extraction
+        # Process knowledge extraction from both user and agent
         if _knowledge_plugin and _knowledge_plugin.is_available():
             try:
+                # Extract from user message
                 await _knowledge_plugin.process_message(message, role="user")
+                # Extract from agent response (search results, summaries)
+                await _knowledge_plugin.process_message(response_text, role="assistant")
             except Exception:
                 pass
     
@@ -489,27 +567,33 @@ async def index():
 
 
 @app.get("/api/stats")
-async def get_stats():
-    """Get memory system statistics."""
+async def get_stats(user_id: str = ""):
+    """Get memory system statistics for a specific user."""
     if not _memory:
         return {"status": "unavailable", "message": "Memory not initialized"}
     
+    effective_user_id = user_id or get_current_user_id()
+    
     stats = await _memory.get_stats()
+    # Add user-specific L1 stats
+    stats["l1_user_stats"] = _memory._l1.get_stats(effective_user_id)
     return stats
 
 
 @app.get("/api/memory/context")
-async def get_memory_context(query: str = "", limit: int = 10):
-    """Get relevant memory items for a query."""
+async def get_memory_context(query: str = "", limit: int = 10, user_id: str = ""):
+    """Get relevant memory items for a query (filtered by user)."""
     if not _memory:
         return {"items": [], "message": "Memory not available"}
+    
+    effective_user_id = user_id or get_current_user_id()
     
     try:
         # Use recall() for query-based search, or get_working_memory() for empty query
         if query:
-            nodes = await _memory.recall(query, top_k=limit)
+            nodes = await _memory.recall(query, top_k=limit, user_id=effective_user_id)
         else:
-            nodes = await _memory.get_working_memory(limit=limit)
+            nodes = await _memory.get_working_memory(limit=limit, user_id=effective_user_id)
         return {
             "items": [
                 {
@@ -517,6 +601,7 @@ async def get_memory_context(query: str = "", limit: int = 10):
                     "content": n.content[:200] + "..." if len(n.content) > 200 else n.content,
                     "energy": round(n.energy, 3),
                     "tier": n.tier,
+                    "user_id": n.user_id,
                 }
                 for n in nodes
             ]
@@ -526,12 +611,13 @@ async def get_memory_context(query: str = "", limit: int = 10):
 
 
 @app.get("/api/l1")
-async def get_l1_nodes():
-    """Get all L1 working memory nodes."""
+async def get_l1_nodes(user_id: str = ""):
+    """Get all L1 working memory nodes for a specific user."""
     if not _memory:
         return {"nodes": [], "message": "Memory not initialized"}
     
-    nodes = await _memory.get_working_memory(limit=100)
+    effective_user_id = user_id or get_current_user_id()
+    nodes = await _memory.get_working_memory(limit=100, user_id=effective_user_id)
     return {
         "nodes": [
             {
@@ -539,6 +625,7 @@ async def get_l1_nodes():
                 "content": n.content[:200] + "..." if len(n.content) > 200 else n.content,
                 "energy": round(n.energy, 3),
                 "tier": n.tier,
+                "user_id": n.user_id,
                 "created_at": n.metadata.timestamp,
                 "source": n.metadata.source,
                 "entities": n.metadata.entities[:5],
@@ -550,20 +637,25 @@ async def get_l1_nodes():
 
 
 @app.get("/api/l2/graph")
-async def get_l2_graph():
-    """Get L2 graph data for D3.js visualization."""
+async def get_l2_graph(user_id: str = ""):
+    """Get L2 graph data for D3.js visualization (filtered by user)."""
     if not _memory:
         return {"nodes": [], "links": [], "message": "Memory not initialized"}
+    
+    effective_user_id = user_id or get_current_user_id()
     
     # Get graph storage directly
     graph = _memory._l2_graph
     vector = _memory._l2_vector
     
-    # Get all nodes and edges from NetworkX
+    # Get nodes belonging to this user
+    user_nodes = graph._get_user_nodes(effective_user_id)
+    
+    # Get all nodes and edges from NetworkX (filtered by user)
     nodes_data = []
     edges_data = []
     
-    for node_id in graph._graph.nodes():
+    for node_id in user_nodes:
         # Fetch content from Milvus vector storage
         node = await vector.get(node_id)
         if node:
@@ -572,6 +664,7 @@ async def get_l2_graph():
                 "content": node.content[:100] + "..." if len(node.content) > 100 else node.content,
                 "energy": node.energy,
                 "tier": node.tier,
+                "user_id": node.user_id,
             })
         else:
             # Fallback if not found in Milvus
@@ -581,15 +674,18 @@ async def get_l2_graph():
                 "content": f"[Node {node_id[:8]}]",
                 "energy": node_attrs.get("energy", 0.5),
                 "tier": "L2",
+                "user_id": node_attrs.get("user_id", ""),
             })
     
     for source, target, attrs in graph._graph.edges(data=True):
-        edges_data.append({
-            "source": source,
-            "target": target,
-            "weight": attrs.get("weight", 1.0),
-            "type": attrs.get("link_type", "semantic"),
-        })
+        # Only include edges between user's nodes
+        if source in user_nodes and target in user_nodes:
+            edges_data.append({
+                "source": source,
+                "target": target,
+                "weight": attrs.get("weight", 1.0),
+                "type": attrs.get("link_type", "semantic"),
+            })
     
     return {
         "nodes": nodes_data,
@@ -598,23 +694,26 @@ async def get_l2_graph():
 
 
 @app.get("/api/l2/vector")
-async def get_l2_vector_nodes():
-    """Get L2 vector storage nodes."""
+async def get_l2_vector_nodes(user_id: str = ""):
+    """Get L2 vector storage nodes (filtered by user)."""
     if not _memory:
         return {"nodes": [], "message": "Memory not initialized"}
     
-    # Query all nodes from Milvus (limited)
+    effective_user_id = user_id or get_current_user_id()
+    
+    # Query nodes from Milvus (filtered by user)
     vector_storage = _memory._l2_vector
     
     if not vector_storage._connected:
         return {"nodes": [], "message": "Vector storage not connected"}
     
     try:
-        # Query recent nodes
+        # Query nodes for this user
+        filter_expr = f'user_id == "{effective_user_id}"' if effective_user_id else ""
         results = vector_storage._client.query(
             collection_name=vector_storage.config.collection_name,
-            filter="",
-            output_fields=["id", "content", "energy", "tier", "source", "timestamp", "entities"],
+            filter=filter_expr,
+            output_fields=["id", "content", "energy", "tier", "source", "timestamp", "entities", "user_id"],
             limit=100,
         )
         
@@ -628,6 +727,7 @@ async def get_l2_vector_nodes():
                     "source": r.get("source", ""),
                     "created_at": r.get("timestamp", 0),
                     "entities": r.get("entities", [])[:5],
+                    "user_id": r.get("user_id", ""),
                 }
                 for r in results
             ]
@@ -637,17 +737,19 @@ async def get_l2_vector_nodes():
 
 
 @app.get("/api/l3/facts")
-async def get_l3_facts():
-    """Get L3 crystal facts."""
+async def get_l3_facts(user_id: str = ""):
+    """Get L3 crystal facts (filtered by user)."""
     if not _memory:
         return {"facts": [], "message": "Memory not initialized"}
+    
+    effective_user_id = user_id or get_current_user_id()
     
     tier = _memory._tier
     if not tier._l3_available:
         return {"facts": [], "message": "L3 storage not available"}
     
     try:
-        facts = await _memory._l3.get_all_facts(limit=100)
+        facts = await _memory._l3.get_all_facts(limit=100, user_id=effective_user_id)
         return {
             "facts": [
                 {
@@ -656,6 +758,7 @@ async def get_l3_facts():
                     "confidence": round(f.confidence, 3),
                     "created_at": f.created_at,
                     "source_count": len(f.source_node_ids),
+                    "user_id": f.user_id,
                 }
                 for f in facts
             ]
@@ -665,17 +768,19 @@ async def get_l3_facts():
 
 
 @app.get("/api/l3/links")
-async def get_l3_links():
-    """Get L3 persistent links with content snippets."""
+async def get_l3_links(user_id: str = ""):
+    """Get L3 persistent links with content snippets (filtered by user)."""
     if not _memory:
         return {"links": [], "message": "Memory not initialized"}
+    
+    effective_user_id = user_id or get_current_user_id()
     
     tier = _memory._tier
     if not tier._l3_available:
         return {"links": [], "message": "L3 storage not available"}
     
     try:
-        links = await _memory._l3.get_all_links(limit=100)
+        links = await _memory._l3.get_all_links(limit=100, user_id=effective_user_id)
         
         # Fetch content snippets for source and target nodes
         result_links = []
@@ -719,6 +824,36 @@ async def delete_node(node_id: str):
     return {"success": success, "node_id": node_id}
 
 
+@app.post("/api/memory/consolidate")
+async def trigger_consolidation():
+    """Manually trigger memory consolidation (for testing).
+    
+    This will scan L2 for similar nodes and create L3 facts.
+    """
+    if not _memory:
+        raise HTTPException(status_code=503, detail="Memory not initialized")
+    
+    tier = _memory._tier
+    if not tier._l3_available:
+        return {"success": False, "message": "L3 storage not available"}
+    
+    try:
+        # Run consolidation
+        await tier._run_consolidation()
+        
+        # Get updated stats
+        stats = await tier.get_stats()
+        
+        return {
+            "success": True,
+            "message": "Consolidation completed",
+            "l3_facts_count": stats.get("l3", {}).get("facts_count", 0),
+            "l3_links_count": stats.get("l3", {}).get("links_count", 0),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ==================== Config API ====================
 
 @app.get("/api/config")
@@ -757,12 +892,20 @@ async def get_users():
 
 @app.post("/api/user/switch")
 async def switch_user(user_id: str):
-    """Switch to a different user_id for testing."""
-    global _current_user_id, _knowledge_plugin
+    """Switch to a different user_id.
+    
+    Memory data is filtered by user_id (per-user isolation).
+    Knowledge data is global (shared across all users).
+    """
+    global _current_user_id, _knowledge_plugin, _memory
     
     _current_user_id = user_id
     
-    # Update knowledge plugin config if available
+    # Update memory manager user context
+    if _memory:
+        _memory.set_user_id(user_id)
+    
+    # Update knowledge plugin config (for attribution, not isolation)
     if _knowledge_plugin:
         _knowledge_plugin.config.user_id = user_id
     
@@ -772,46 +915,169 @@ async def switch_user(user_id: str):
 @app.post("/api/user/create")
 async def create_user(user_id: str):
     """Create a new user (just sets it as current, data will be created on first message)."""
-    global _current_user_id, _knowledge_plugin
+    global _current_user_id, _knowledge_plugin, _memory
     
     if not user_id or not user_id.strip():
         return {"success": False, "error": "Invalid user_id"}
     
     _current_user_id = user_id.strip()
     
-    # Update knowledge plugin config
+    # Update memory manager user context
+    if _memory:
+        _memory.set_user_id(_current_user_id)
+    
+    # Update knowledge plugin config (for attribution)
     if _knowledge_plugin:
         _knowledge_plugin.config.user_id = _current_user_id
     
     return {"success": True, "user_id": _current_user_id}
 
 
+@app.get("/api/debug/user_ids")
+async def debug_user_ids():
+    """Debug endpoint to show all user_ids in the system."""
+    result = {
+        "current_user": get_current_user_id(),
+        "memory_manager_user": _memory._current_user_id if _memory else None,
+    }
+    
+    # Check L2 Vector (Milvus) user_ids
+    if _memory and _memory._l2_vector._connected:
+        try:
+            all_nodes = _memory._l2_vector._client.query(
+                collection_name=_memory._l2_vector.config.collection_name,
+                filter="",
+                output_fields=["id", "user_id"],
+                limit=1000,
+            )
+            user_ids = set(r.get("user_id", "") for r in all_nodes)
+            result["l2_vector_user_ids"] = list(user_ids)
+            result["l2_vector_total"] = len(all_nodes)
+        except Exception as e:
+            result["l2_vector_error"] = str(e)
+    
+    # Check L2 Graph user_ids
+    if _memory:
+        try:
+            graph = _memory._l2_graph._graph
+            graph_user_ids = set()
+            for node_id in graph.nodes():
+                uid = graph.nodes[node_id].get("user_id", "")
+                graph_user_ids.add(uid)
+            result["l2_graph_user_ids"] = list(graph_user_ids)
+            result["l2_graph_total"] = graph.number_of_nodes()
+        except Exception as e:
+            result["l2_graph_error"] = str(e)
+    
+    # Check L3 Facts user_ids
+    if _memory and _memory._tier._l3_available:
+        try:
+            async with _memory._l3._pool.acquire() as conn:
+                rows = await conn.fetch("SELECT DISTINCT user_id FROM crystal_facts")
+                result["l3_facts_user_ids"] = [r["user_id"] for r in rows]
+                count = await conn.fetchval("SELECT COUNT(*) FROM crystal_facts")
+                result["l3_facts_total"] = count
+        except Exception as e:
+            result["l3_facts_error"] = str(e)
+    
+    return result
+
+
+@app.post("/api/debug/migrate_user_id")
+async def migrate_user_id(target_user_id: str):
+    """Migrate all memory data with empty user_id to the target user_id."""
+    if not _memory:
+        return {"error": "Memory not initialized"}
+    
+    result = {"migrated": {}}
+    
+    # Migrate L2 Vector (Milvus) - use upsert to update user_id
+    if _memory._l2_vector._connected:
+        try:
+            # Find nodes with empty user_id
+            empty_nodes = _memory._l2_vector._client.query(
+                collection_name=_memory._l2_vector.config.collection_name,
+                filter='user_id == ""',
+                output_fields=["*"],  # Get all fields for upsert
+                limit=10000,
+            )
+            
+            if empty_nodes:
+                # Update user_id and upsert back
+                for node_data in empty_nodes:
+                    node_data["user_id"] = target_user_id
+                
+                _memory._l2_vector._client.upsert(
+                    collection_name=_memory._l2_vector.config.collection_name,
+                    data=empty_nodes
+                )
+                result["migrated"]["l2_vector"] = {"count": len(empty_nodes)}
+            else:
+                result["migrated"]["l2_vector"] = {"count": 0, "note": "No migration needed"}
+        except Exception as e:
+            result["migrated"]["l2_vector"] = {"error": str(e)}
+    
+    # Migrate L2 Graph
+    try:
+        graph = _memory._l2_graph._graph
+        migrated_count = 0
+        for node_id in graph.nodes():
+            if not graph.nodes[node_id].get("user_id"):
+                graph.nodes[node_id]["user_id"] = target_user_id
+                migrated_count += 1
+        result["migrated"]["l2_graph"] = {"count": migrated_count}
+    except Exception as e:
+        result["migrated"]["l2_graph"] = {"error": str(e)}
+    
+    # Migrate L3 Facts
+    if _memory._tier._l3_available:
+        try:
+            async with _memory._l3._pool.acquire() as conn:
+                updated = await conn.execute(
+                    "UPDATE crystal_facts SET user_id = $1 WHERE user_id = '' OR user_id IS NULL",
+                    target_user_id
+                )
+                result["migrated"]["l3_facts"] = {"count": int(updated.split()[-1])}
+                
+                updated_links = await conn.execute(
+                    "UPDATE crystal_links SET user_id = $1 WHERE user_id = '' OR user_id IS NULL",
+                    target_user_id
+                )
+                result["migrated"]["l3_links"] = {"count": int(updated_links.split()[-1])}
+        except Exception as e:
+            result["migrated"]["l3"] = {"error": str(e)}
+    
+    return result
+
+
 # ==================== Knowledge APIs ====================
+# NOTE: Knowledge is GLOBAL (shared across all users)
+# Unlike Memory which is per-user isolated
 
 @app.get("/api/knowledge/stats")
 async def get_knowledge_stats():
-    """Get knowledge store statistics."""
+    """Get knowledge store statistics (GLOBAL - not per-user)."""
     if not _knowledge_store:
         return {"status": "unavailable"}
     
     try:
-        stats = await _knowledge_store.get_stats(get_current_user_id())
+        # Knowledge stats are global (no user_id filter)
+        stats = await _knowledge_store.get_stats()
+        stats["note"] = "Knowledge is shared globally across all users"
         return stats
     except Exception as e:
         return {"error": str(e)}
 
 
 @app.get("/api/knowledge/triples")
-async def get_knowledge_triples(user_id: str = "", limit: int = 100):
-    """Get all knowledge triples for the specified or default user."""
+async def get_knowledge_triples(limit: int = 100):
+    """Get all knowledge triples (GLOBAL - shared across all users)."""
     if not _knowledge_store:
         return {"triples": [], "message": "Knowledge store not available"}
     
-    # Use specified user_id or current user
-    effective_user_id = user_id or get_current_user_id()
-    
     try:
-        triples = await _knowledge_store.get_all(effective_user_id, limit)
+        # Knowledge is global - no user_id filter
+        triples = await _knowledge_store.get_all(limit=limit)
         return {
             "triples": [
                 {
@@ -823,28 +1089,27 @@ async def get_knowledge_triples(user_id: str = "", limit: int = 100):
                     "source": t.source.value,
                     "version": t.version,
                     "previous_values": t.previous_values,
-                    "user_id": t.user_id,
+                    "contributed_by": t.user_id,  # Who added this knowledge
                     "created_at": t.created_at,
                     "updated_at": t.updated_at,
                 }
                 for t in triples
-            ]
+            ],
+            "note": "Knowledge is shared globally across all users"
         }
     except Exception as e:
         return {"triples": [], "error": str(e)}
 
 
 @app.get("/api/knowledge/search")
-async def search_knowledge(q: str, user_id: str = "", limit: int = 20):
-    """Search knowledge triples for the specified or default user."""
+async def search_knowledge(q: str, limit: int = 20):
+    """Search knowledge triples (GLOBAL - shared across all users)."""
     if not _knowledge_store:
         return {"triples": [], "message": "Knowledge store not available"}
     
-    # Use specified user_id or current user
-    effective_user_id = user_id or get_current_user_id()
-    
     try:
-        triples = await _knowledge_store.search(q, effective_user_id, limit)
+        # Knowledge search is global (no user_id filter)
+        triples = await _knowledge_store.search(q, limit=limit)
         return {
             "triples": [
                 {
@@ -854,6 +1119,7 @@ async def search_knowledge(q: str, user_id: str = "", limit: int = 20):
                     "object": t.object,
                     "confidence": round(t.confidence, 3),
                     "source": t.source.value,
+                    "contributed_by": t.user_id,
                 }
                 for t in triples
             ]

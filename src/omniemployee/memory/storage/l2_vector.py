@@ -112,6 +112,13 @@ class L2VectorStorage(VectorStorageBackend):
             datatype=DataType.FLOAT
         )
         
+        # User ID for multi-user isolation
+        schema.add_field(
+            field_name="user_id",
+            datatype=DataType.VARCHAR,
+            max_length=64
+        )
+        
         # Index parameters
         index_params = self._client.prepare_index_params()
         index_params.add_index(
@@ -147,6 +154,7 @@ class L2VectorStorage(VectorStorageBackend):
             "last_accessed": int(node.last_accessed),
             "tier": node.tier,
             "sentiment": node.metadata.sentiment,
+            "user_id": node.user_id,
             # Dynamic fields
             "entities": node.metadata.entities,
             "source": node.metadata.source,
@@ -189,11 +197,12 @@ class L2VectorStorage(VectorStorageBackend):
         )
         return len(results) > 0
     
-    async def list_all(self) -> list[MemoryNode]:
-        """List all nodes (limited to avoid memory issues)."""
+    async def list_all(self, user_id: str = "") -> list[MemoryNode]:
+        """List all nodes (limited to avoid memory issues). Filter by user_id if provided."""
+        filter_expr = f'user_id == "{user_id}"' if user_id else ""
         results = self._client.query(
             collection_name=self.config.collection_name,
-            filter="",
+            filter=filter_expr,
             output_fields=["*"],
             limit=1000
         )
@@ -213,7 +222,8 @@ class L2VectorStorage(VectorStorageBackend):
         self,
         vector: list[float],
         top_k: int = 10,
-        filters: dict[str, Any] | None = None
+        filters: dict[str, Any] | None = None,
+        user_id: str = ""
     ) -> list[tuple[MemoryNode, float]]:
         """Search by vector similarity with optional filters.
         
@@ -221,11 +231,18 @@ class L2VectorStorage(VectorStorageBackend):
             vector: Query vector
             top_k: Number of results
             filters: Scalar filters (e.g., {"energy": {"$gte": 0.5}})
+            user_id: Filter by user ID (empty = no filter)
         
         Returns:
             List of (node, similarity_score) tuples
         """
-        filter_expr = self._build_filter_expr(filters) if filters else ""
+        # Build filter expression
+        filter_parts = []
+        if filters:
+            filter_parts.append(self._build_filter_expr(filters))
+        if user_id:
+            filter_parts.append(f'user_id == "{user_id}"')
+        filter_expr = " and ".join(filter_parts) if filter_parts else ""
         
         results = self._client.search(
             collection_name=self.config.collection_name,
@@ -251,10 +268,14 @@ class L2VectorStorage(VectorStorageBackend):
         self,
         min_energy: float = 0.0,
         max_energy: float = 1.0,
-        limit: int = 100
+        limit: int = 100,
+        user_id: str = ""
     ) -> list[MemoryNode]:
-        """Query nodes within an energy range."""
-        filter_expr = f"energy >= {min_energy} and energy <= {max_energy}"
+        """Query nodes within an energy range. Filter by user_id if provided."""
+        filter_parts = [f"energy >= {min_energy}", f"energy <= {max_energy}"]
+        if user_id:
+            filter_parts.append(f'user_id == "{user_id}"')
+        filter_expr = " and ".join(filter_parts)
         
         results = self._client.query(
             collection_name=self.config.collection_name,
@@ -354,7 +375,24 @@ class L2VectorStorage(VectorStorageBackend):
             last_accessed=float(result.get("last_accessed", time.time())),
             created_at=float(result.get("created_at", time.time())),
             tier=result.get("tier", "L2"),
+            user_id=result.get("user_id", ""),
         )
+    
+    async def list_recent(self, limit: int = 100, user_id: str = "") -> list[MemoryNode]:
+        """List most recently created nodes. Filter by user_id if provided."""
+        filter_expr = f'user_id == "{user_id}"' if user_id else ""
+        
+        results = self._client.query(
+            collection_name=self.config.collection_name,
+            filter=filter_expr,
+            output_fields=["*"],
+            limit=limit
+        )
+        
+        # Sort by created_at descending
+        nodes = [self._result_to_node(r) for r in results]
+        nodes.sort(key=lambda n: n.created_at, reverse=True)
+        return nodes[:limit]
     
     def get_stats(self) -> dict[str, Any]:
         """Get collection statistics."""

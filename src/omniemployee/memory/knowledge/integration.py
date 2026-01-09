@@ -47,7 +47,13 @@ class ProcessResult:
 
 @dataclass
 class KnowledgePluginConfig:
-    """Configuration for the knowledge learning plugin."""
+    """Configuration for the knowledge learning plugin.
+    
+    NOTE: Knowledge is GLOBAL (shared across all users).
+    - user_id is used for ATTRIBUTION (who contributed knowledge), not isolation
+    - All users share the same knowledge base
+    - Personal user info (name, age, preferences) should go in Memory, not Knowledge
+    """
     store_config: KnowledgeStoreConfig = field(default_factory=KnowledgeStoreConfig)
     vector_config: KnowledgeVectorConfig = field(default_factory=KnowledgeVectorConfig)
     extractor_config: ExtractorConfig = field(default_factory=ExtractorConfig)
@@ -55,13 +61,13 @@ class KnowledgePluginConfig:
     
     # Auto-store triples that have no conflicts
     auto_store: bool = True
-    # Extract from both user and agent messages
-    extract_from_agent: bool = False
+    # Extract from both user and agent messages (agent search results are valuable!)
+    extract_from_agent: bool = True
     # Maximum knowledge items to include in context
     max_context_items: int = 10
     # Enable vector search (requires Milvus)
     enable_vector_search: bool = True
-    # User ID for this session (for multi-user support)
+    # User ID for attribution (who contributed this knowledge)
     user_id: str = ""
     # Session ID
     session_id: str = ""
@@ -162,6 +168,9 @@ class KnowledgeLearningPlugin:
     ) -> ProcessResult:
         """Process a message for knowledge extraction and storage.
         
+        Extracts objective knowledge from both user messages and agent responses.
+        Knowledge is GLOBAL (shared across all users).
+        
         Args:
             message: The message content
             role: "user" or "assistant"
@@ -176,11 +185,12 @@ class KnowledgeLearningPlugin:
         if role == "assistant" and not self.config.extract_from_agent:
             return ProcessResult(action="none")
         
-        # Extract knowledge
+        # Extract knowledge (pass role to extractor)
         extraction = await self._extractor.extract(
             message,
             session_id=self.config.session_id,
             user_id=self.config.user_id,
+            role=role,  # Pass role for proper source attribution
         )
         
         if not extraction.is_factual or not extraction.triples:
@@ -193,22 +203,30 @@ class KnowledgeLearningPlugin:
         pending_keys = []
         
         for triple in extraction.triples:
-            triple.user_id = self.config.user_id
+            triple.user_id = self.config.user_id  # For attribution (who contributed)
             triple.session_id = self.config.session_id
             
-            # Check for conflicts
+            # Check for conflicts (global knowledge base)
             conflict = await self._conflict_detector.check(triple)
             
             if conflict.has_conflict:
-                # Add to pending confirmations
-                key = self._confirmation.add_pending(
-                    triple, conflict.existing_triple
-                )
-                prompt = self._confirmation.generate_confirmation_prompt(conflict)
-                
-                conflicts.append(conflict)
-                prompts.append(prompt)
-                pending_keys.append(key)
+                # For agent-sourced knowledge, auto-update if confidence is higher
+                if role == "assistant" and triple.confidence > (conflict.existing_triple.confidence if conflict.existing_triple else 0):
+                    # Agent search results often have newer/more accurate info
+                    await self._store.store(triple)
+                    if self._vector_store:
+                        await self._vector_store.store(triple)
+                    stored.append(triple)
+                else:
+                    # Add to pending confirmations for user-sourced conflicts
+                    key = self._confirmation.add_pending(
+                        triple, conflict.existing_triple
+                    )
+                    prompt = self._confirmation.generate_confirmation_prompt(conflict)
+                    
+                    conflicts.append(conflict)
+                    prompts.append(prompt)
+                    pending_keys.append(key)
                 
             elif self.config.auto_store:
                 # No conflict, auto-store
@@ -292,42 +310,77 @@ class KnowledgeLearningPlugin:
     
     # ==================== Knowledge Retrieval ====================
     
-    async def get_context_for_query(
+    async def get_relevant_triples(
         self,
         query: str,
         max_items: int | None = None,
-    ) -> str:
-        """Get relevant knowledge context for a query.
+        use_cluster_expansion: bool = True,
+    ) -> list[KnowledgeTriple]:
+        """Get relevant knowledge triples for a query.
         
-        Uses vector search if available, falls back to text search.
+        Uses vector search with cluster expansion if available.
+        Knowledge is GLOBAL (shared across all users).
         
         Args:
             query: The user's query
             max_items: Maximum items to include
+            use_cluster_expansion: Whether to expand to related clusters
             
         Returns:
-            Formatted knowledge context string
+            List of relevant KnowledgeTriple objects
         """
         if not self.is_available():
-            return ""
+            return []
         
         max_items = max_items or self.config.max_context_items
         triples = []
         
-        # Try vector search first
+        # Try vector search with cluster expansion
         if self._vector_store and self._vector_store.is_available():
-            results = await self._vector_store.search(
-                query, self.config.user_id, max_items
-            )
-            # Fetch full triples from PostgreSQL
-            for triple_id, score in results:
+            if use_cluster_expansion:
+                results = await self._vector_store.search_with_cluster_expansion(
+                    query, 
+                    top_k=max_items // 2,
+                    expansion_k=3,
+                    min_score=0.5
+                )
+            else:
+                results = await self._vector_store.search(query, top_k=max_items)
+            
+            for triple_id, score in results[:max_items]:
                 triple = await self._store.get(triple_id)
                 if triple:
                     triples.append(triple)
         
         # Fall back to text search if vector search yielded nothing
         if not triples:
-            triples = await self._store.search(query, self.config.user_id, max_items)
+            triples = await self._store.search(query, limit=max_items)
+        
+        return triples
+    
+    async def get_context_for_query(
+        self,
+        query: str,
+        max_items: int | None = None,
+        use_cluster_expansion: bool = True,
+    ) -> str:
+        """Get relevant knowledge context for a query.
+        
+        Uses vector search with cluster expansion if available:
+        1. First retrieve semantically similar knowledge
+        2. Expand to related knowledge clusters
+        
+        Knowledge is GLOBAL (shared across all users).
+        
+        Args:
+            query: The user's query
+            max_items: Maximum items to include
+            use_cluster_expansion: Whether to expand to related clusters
+            
+        Returns:
+            Formatted knowledge context string
+        """
+        triples = await self.get_relevant_triples(query, max_items, use_cluster_expansion)
         
         if not triples:
             return ""
@@ -344,7 +397,7 @@ class KnowledgeLearningPlugin:
         self,
         limit: int = 50,
     ) -> list[KnowledgeTriple]:
-        """Get all stored knowledge for current user.
+        """Get all stored knowledge (GLOBAL - shared across users).
         
         Args:
             limit: Maximum items to return
@@ -355,13 +408,14 @@ class KnowledgeLearningPlugin:
         if not self.is_available():
             return []
         
-        return await self._store.get_all(self.config.user_id, limit)
+        # Knowledge is global - no user_id filter
+        return await self._store.get_all(limit=limit)
     
     async def get_knowledge_about(
         self,
         subject: str,
     ) -> list[KnowledgeTriple]:
-        """Get all knowledge about a specific subject.
+        """Get all knowledge about a specific subject (GLOBAL).
         
         Args:
             subject: The subject to query
@@ -372,16 +426,62 @@ class KnowledgeLearningPlugin:
         if not self.is_available():
             return []
         
-        return await self._store.query_by_subject(subject, self.config.user_id)
+        # Knowledge is global - no user_id filter
+        return await self._store.query_by_subject(subject)
+    
+    async def get_knowledge_cluster(
+        self,
+        query: str,
+        initial_k: int = 5,
+        expansion_k: int = 3,
+    ) -> list[KnowledgeTriple]:
+        """Get knowledge with cluster expansion.
+        
+        Retrieves initial_k related knowledge items, then expands to
+        expansion_k additional related items for each result.
+        
+        This mimics human knowledge recall - activating one concept
+        activates related concepts.
+        
+        Args:
+            query: Search query
+            initial_k: Initial retrieval count
+            expansion_k: How many related items per initial result
+            
+        Returns:
+            List of knowledge triples with cluster expansion
+        """
+        if not self.is_available():
+            return []
+        
+        triples = []
+        
+        if self._vector_store and self._vector_store.is_available():
+            results = await self._vector_store.search_with_cluster_expansion(
+                query,
+                top_k=initial_k,
+                expansion_k=expansion_k,
+            )
+            
+            for triple_id, score in results:
+                triple = await self._store.get(triple_id)
+                if triple:
+                    triples.append(triple)
+        else:
+            # Fall back to text search
+            triples = await self._store.search(query, limit=initial_k)
+        
+        return triples
     
     # ==================== Statistics ====================
     
     async def get_stats(self) -> dict[str, Any]:
-        """Get knowledge store statistics."""
+        """Get knowledge store statistics (GLOBAL)."""
         if not self.is_available():
             return {"status": "unavailable"}
         
-        stats = await self._store.get_stats(self.config.user_id)
+        # Knowledge stats are global (no user_id filter)
+        stats = await self._store.get_stats()
         stats["pending_confirmations"] = len(self._confirmation.get_all_pending_keys())
         
         # Add vector store stats

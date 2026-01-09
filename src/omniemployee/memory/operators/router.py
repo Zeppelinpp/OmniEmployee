@@ -65,8 +65,8 @@ class AssociationRouter:
         self._l3: L3CrystalStorage | None = None
         self._l3_available = False
         
-        # Recent nodes for temporal linking
-        self._recent_nodes: list[tuple[str, float]] = []  # (node_id, timestamp)
+        # Recent nodes for temporal linking (node_id, timestamp, user_id)
+        self._recent_nodes: list[tuple[str, float, str]] = []
         self._max_recent = 50
         
         # Optional LLM callback for causal inference
@@ -91,44 +91,47 @@ class AssociationRouter:
     async def route_new_node(
         self,
         node: MemoryNode,
-        context_nodes: list[MemoryNode] | None = None
+        context_nodes: list[MemoryNode] | None = None,
+        user_id: str = ""
     ) -> list[Link]:
         """Establish links for a newly created node.
         
         Args:
             node: The new node to route
             context_nodes: Optional list of contextually relevant nodes
+            user_id: User ID for graph node isolation
         
         Returns:
             List of created links
         """
         created_links = []
+        effective_user_id = user_id or node.user_id
         
         # Temporal links
         if self.config.temporal_strategy == LinkStrategy.AUTO:
-            temporal_links = await self._create_temporal_links(node)
+            temporal_links = await self._create_temporal_links(node, effective_user_id)
             created_links.extend(temporal_links)
         
         # Semantic links (if context nodes provided)
         if self.config.semantic_strategy == LinkStrategy.AUTO and context_nodes:
-            semantic_links = await self._create_semantic_links(node, context_nodes)
+            semantic_links = await self._create_semantic_links(node, context_nodes, effective_user_id)
             created_links.extend(semantic_links)
         
         # Update recent nodes list
-        self._update_recent_nodes(node.id, node.created_at)
+        self._update_recent_nodes(node.id, node.created_at, effective_user_id)
         
         return created_links
     
-    async def _create_temporal_links(self, node: MemoryNode) -> list[Link]:
+    async def _create_temporal_links(self, node: MemoryNode, user_id: str = "") -> list[Link]:
         """Create temporal links to recently created nodes."""
         links = []
         current_time = node.created_at
         cutoff = current_time - self.config.temporal_window
         
-        # Find nodes within temporal window
+        # Find nodes within temporal window (filtered by user_id)
         recent_in_window = [
-            (node_id, ts) for node_id, ts in self._recent_nodes
-            if ts >= cutoff and node_id != node.id
+            (node_id, ts) for node_id, ts, uid in self._recent_nodes
+            if ts >= cutoff and node_id != node.id and (not user_id or uid == user_id)
         ]
         
         # Sort by recency and take top N
@@ -143,20 +146,20 @@ class AssociationRouter:
                 link_type=LinkType.TEMPORAL,
                 weight=self._temporal_weight(current_time, target_ts)
             )
-            await self._persist_link(link)
+            await self._persist_link(link, user_id)
             links.append(link)
         
         return links
     
-    async def _persist_link(self, link: Link) -> None:
+    async def _persist_link(self, link: Link, user_id: str = "") -> None:
         """Persist link to both graph and L3 storage."""
-        # Add to in-memory graph
-        await self.graph.add_link(link)
+        # Add to in-memory graph (with user_id)
+        await self.graph.add_link(link, user_id)
         
-        # Persist to L3 if available
+        # Persist to L3 if available (with user_id for filtering)
         if self._l3_available and self._l3:
             try:
-                await self._l3.store_link(link)
+                await self._l3.store_link(link, user_id=user_id)
             except Exception as e:
                 # Log but don't fail - graph already has the link
                 print(f"[Router] Failed to persist link to L3: {e}")
@@ -176,7 +179,8 @@ class AssociationRouter:
     async def _create_semantic_links(
         self,
         node: MemoryNode,
-        candidates: list[MemoryNode]
+        candidates: list[MemoryNode],
+        user_id: str = ""
     ) -> list[Link]:
         """Create semantic links to similar nodes."""
         links = []
@@ -184,10 +188,13 @@ class AssociationRouter:
         if not node.vector:
             return links
         
-        # Calculate similarities
+        # Calculate similarities (only with same user's nodes)
         similarities = []
         for candidate in candidates:
             if candidate.id == node.id or not candidate.vector:
+                continue
+            # Filter by user_id if specified
+            if user_id and candidate.user_id != user_id:
                 continue
             
             sim = self._cosine_similarity(node.vector, candidate.vector)
@@ -205,7 +212,7 @@ class AssociationRouter:
                 link_type=LinkType.SEMANTIC,
                 weight=sim
             )
-            await self._persist_link(link)
+            await self._persist_link(link, user_id)
             links.append(link)
         
         return links
@@ -342,9 +349,9 @@ class AssociationRouter:
                 decay_factor=0.5
             )
     
-    def _update_recent_nodes(self, node_id: str, timestamp: float) -> None:
+    def _update_recent_nodes(self, node_id: str, timestamp: float, user_id: str = "") -> None:
         """Update the recent nodes list."""
-        self._recent_nodes.append((node_id, timestamp))
+        self._recent_nodes.append((node_id, timestamp, user_id))
         
         # Trim if too large
         if len(self._recent_nodes) > self._max_recent:
@@ -371,7 +378,7 @@ class AssociationRouter:
         
         # Also remove node from recent list
         self._recent_nodes = [
-            (nid, ts) for nid, ts in self._recent_nodes
+            (nid, ts, uid) for nid, ts, uid in self._recent_nodes
             if nid != node_id
         ]
         

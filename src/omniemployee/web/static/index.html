@@ -370,6 +370,92 @@
             color: var(--text-primary);
         }
 
+        /* User Selector */
+        .user-selector {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .user-selector label {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        .user-select {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            cursor: pointer;
+            min-width: 140px;
+            transition: all 0.2s;
+        }
+
+        .user-select:hover {
+            border-color: var(--accent-cyan);
+        }
+
+        .user-select:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 2px rgba(120, 220, 232, 0.2);
+        }
+
+        .user-select option {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        .new-user-btn {
+            background: transparent;
+            border: 1px dashed var(--border);
+            color: var(--accent-green);
+            padding: 0.4rem 0.6rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+        }
+
+        .new-user-btn:hover {
+            border-color: var(--accent-green);
+            background: rgba(169, 220, 118, 0.1);
+        }
+
+        /* Shared/User badge */
+        .shared-badge {
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(252, 152, 103, 0.2);
+            color: var(--accent-orange);
+            margin-left: 0.5rem;
+            vertical-align: middle;
+        }
+
+        .user-badge {
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(169, 220, 118, 0.2);
+            color: var(--accent-green);
+            margin-left: 0.5rem;
+        }
+
+        /* Tab icons for global vs user-specific */
+        .tab[data-tab="knowledge"] {
+            color: var(--accent-green);
+        }
+
+        .tab[data-tab="knowledge"].active {
+            border-bottom-color: var(--accent-green);
+        }
+
         /* Scrollbar */
         ::-webkit-scrollbar {
             width: 8px;
@@ -394,6 +480,13 @@
     <header class="header">
         <h1>⧫ BIEM Memory & Knowledge</h1>
         <div class="stats-bar">
+            <div class="user-selector">
+                <label>👤 User:</label>
+                <select id="user-select" class="user-select" onchange="switchUser(this.value)">
+                    <option value="">Loading...</option>
+                </select>
+                <button class="new-user-btn" onclick="createNewUser()" title="Create new user">+</button>
+            </div>
             <div class="stat">
                 <span class="stat-label">L1:</span>
                 <span class="stat-value" id="stat-l1">-</span>
@@ -410,8 +503,8 @@
                 <span class="stat-label">L3:</span>
                 <span class="stat-value" id="stat-l3">-</span>
             </div>
-            <div class="stat">
-                <span class="stat-label">Knowledge:</span>
+            <div class="stat" title="Global knowledge triples (shared across all users)">
+                <span class="stat-label" style="color: var(--accent-orange);">Knowledge 🌐:</span>
                 <span class="stat-value" id="stat-knowledge">-</span>
             </div>
             <button class="refresh-btn" onclick="refreshAll()">↻ Refresh</button>
@@ -420,7 +513,7 @@
 
     <main class="main-container">
         <section class="graph-panel">
-            <div class="graph-title">Association Graph (L2)</div>
+            <div class="graph-title">Association Graph (L2) <span class="user-badge">Per-User 👤</span></div>
             <div id="graph-container"></div>
             <div class="graph-legend">
                 <div class="legend-item">
@@ -440,11 +533,11 @@
 
         <section class="data-panel">
             <div class="tabs">
-                <div class="tab active" data-tab="l1">L1 Working</div>
-                <div class="tab" data-tab="l2">L2 Vector</div>
-                <div class="tab" data-tab="l3-facts">L3 Facts</div>
-                <div class="tab" data-tab="l3-links">L3 Links</div>
-                <div class="tab" data-tab="knowledge">Knowledge</div>
+                <div class="tab active" data-tab="l1" title="Per-user - filtered by selected user">L1 👤</div>
+                <div class="tab" data-tab="l2" title="Per-user - filtered by selected user">L2 👤</div>
+                <div class="tab" data-tab="l3-facts" title="Per-user - filtered by selected user">L3 Facts 👤</div>
+                <div class="tab" data-tab="l3-links" title="Per-user - filtered by selected user">L3 Links 👤</div>
+                <div class="tab" data-tab="knowledge" title="Global - shared across all users">Knowledge 🌐</div>
             </div>
             <div class="tab-content">
                 <div class="tab-pane active" id="tab-l1">
@@ -520,6 +613,9 @@
     <div class="tooltip" id="tooltip"></div>
 
     <script>
+        // Current user state
+        let currentUserId = '';
+
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
@@ -548,14 +644,82 @@
             return id ? id.substring(0, 8) : '-';
         }
 
+        // Load users list
+        async function loadUsers() {
+            try {
+                const res = await fetch('/api/users');
+                const data = await res.json();
+                const select = document.getElementById('user-select');
+                
+                currentUserId = data.current || '';
+                
+                select.innerHTML = data.users.map(user => 
+                    `<option value="${user}" ${user === currentUserId ? 'selected' : ''}>${user}</option>`
+                ).join('');
+            } catch (e) {
+                console.error('Failed to load users:', e);
+                document.getElementById('user-select').innerHTML = '<option value="default">default</option>';
+                currentUserId = 'default';
+            }
+        }
+
+        // Switch user
+        async function switchUser(userId) {
+            if (!userId || userId === currentUserId) return;
+            
+            try {
+                const res = await fetch(`/api/user/switch?user_id=${encodeURIComponent(userId)}`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentUserId = data.user_id;
+                    // Refresh all data for new user
+                    await refreshAll();
+                }
+            } catch (e) {
+                console.error('Failed to switch user:', e);
+            }
+        }
+
+        // Create new user
+        async function createNewUser() {
+            const newUserId = prompt('Enter new user ID:');
+            if (!newUserId || !newUserId.trim()) return;
+            
+            try {
+                const res = await fetch(`/api/user/create?user_id=${encodeURIComponent(newUserId.trim())}`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentUserId = data.user_id;
+                    // Reload users list and refresh data
+                    await loadUsers();
+                    await refreshAll();
+                } else {
+                    alert(data.error || 'Failed to create user');
+                }
+            } catch (e) {
+                console.error('Failed to create user:', e);
+                alert('Failed to create user');
+            }
+        }
+
         // Load stats
         async function loadStats() {
             try {
-                const res = await fetch('/api/stats');
+                // Memory stats (filtered by current user)
+                const statsUrl = currentUserId 
+                    ? `/api/stats?user_id=${encodeURIComponent(currentUserId)}`
+                    : '/api/stats';
+                const res = await fetch(statsUrl);
                 const stats = await res.json();
                 
+                // Use user-specific L1 stats if available
+                const l1Stats = stats.l1_user_stats || stats.l1 || {};
                 document.getElementById('stat-l1').textContent = 
-                    `${stats.l1?.count || 0}/${stats.l1?.capacity || 0}`;
+                    `${l1Stats.count || 0}/${l1Stats.capacity || 100}`;
                 document.getElementById('stat-l2v').textContent = 
                     stats.l2_vector?.row_count || 0;
                 document.getElementById('stat-l2g').textContent = 
@@ -566,7 +730,7 @@
                 console.error('Failed to load stats:', e);
             }
             
-            // Load knowledge stats
+            // Load knowledge stats (GLOBAL - no user filter)
             try {
                 const kRes = await fetch('/api/knowledge/stats');
                 const kStats = await kRes.json();
@@ -577,15 +741,18 @@
             }
         }
 
-        // Load L1 data
+        // Load L1 data (filtered by current user)
         async function loadL1() {
             try {
-                const res = await fetch('/api/l1');
+                const url = currentUserId 
+                    ? `/api/l1?user_id=${encodeURIComponent(currentUserId)}`
+                    : '/api/l1';
+                const res = await fetch(url);
                 const data = await res.json();
                 const tbody = document.querySelector('#table-l1 tbody');
                 
-                if (data.nodes.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No nodes in working memory</td></tr>';
+                if (!data.nodes || data.nodes.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No nodes in working memory for this user</td></tr>';
                     return;
                 }
                 
@@ -602,15 +769,18 @@
             }
         }
 
-        // Load L2 vector data
+        // Load L2 vector data (filtered by current user)
         async function loadL2Vector() {
             try {
-                const res = await fetch('/api/l2/vector');
+                const url = currentUserId 
+                    ? `/api/l2/vector?user_id=${encodeURIComponent(currentUserId)}`
+                    : '/api/l2/vector';
+                const res = await fetch(url);
                 const data = await res.json();
                 const tbody = document.querySelector('#table-l2 tbody');
                 
                 if (!data.nodes || data.nodes.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No vector nodes</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No vector nodes for this user</td></tr>';
                     return;
                 }
                 
@@ -627,15 +797,18 @@
             }
         }
 
-        // Load L3 facts
+        // Load L3 facts (filtered by current user)
         async function loadL3Facts() {
             try {
-                const res = await fetch('/api/l3/facts');
+                const url = currentUserId 
+                    ? `/api/l3/facts?user_id=${encodeURIComponent(currentUserId)}`
+                    : '/api/l3/facts';
+                const res = await fetch(url);
                 const data = await res.json();
                 const tbody = document.querySelector('#table-l3-facts tbody');
                 
                 if (!data.facts || data.facts.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${data.message || 'No facts'}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${data.message || 'No facts for this user'}</td></tr>`;
                     return;
                 }
                 
@@ -652,15 +825,18 @@
             }
         }
 
-        // Load L3 links
+        // Load L3 links (filtered by current user)
         async function loadL3Links() {
             try {
-                const res = await fetch('/api/l3/links');
+                const url = currentUserId 
+                    ? `/api/l3/links?user_id=${encodeURIComponent(currentUserId)}`
+                    : '/api/l3/links';
+                const res = await fetch(url);
                 const data = await res.json();
                 const tbody = document.querySelector('#table-l3-links tbody');
                 
                 if (!data.links || data.links.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${data.message || 'No links'}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${data.message || 'No links for this user'}</td></tr>`;
                     return;
                 }
                 
@@ -677,15 +853,16 @@
             }
         }
 
-        // Load knowledge triples
+        // Load knowledge triples (GLOBAL - shared across all users)
         async function loadKnowledge() {
             try {
+                // Knowledge is global - no user_id filter
                 const res = await fetch('/api/knowledge/triples');
                 const data = await res.json();
                 const tbody = document.querySelector('#table-knowledge tbody');
                 
                 if (!data.triples || data.triples.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">${data.message || 'No knowledge learned yet'}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">${data.message || 'No global knowledge learned yet'}</td></tr>`;
                     return;
                 }
                 
@@ -695,7 +872,7 @@
                         <td title="${t.predicate}">${t.predicate.replace(/_/g, ' ')}</td>
                         <td title="${t.object}">${t.object}</td>
                         <td><span class="type-badge ${t.source}">${t.source}</span></td>
-                        <td>${t.version}</td>
+                        <td title="Contributed by: ${t.contributed_by || 'unknown'}">${t.version}</td>
                     </tr>
                 `).join('');
             } catch (e) {
@@ -703,12 +880,15 @@
             }
         }
 
-        // D3.js Graph Visualization
+        // D3.js Graph Visualization (filtered by current user)
         let simulation;
         
         async function loadGraph() {
             try {
-                const res = await fetch('/api/l2/graph');
+                const url = currentUserId 
+                    ? `/api/l2/graph?user_id=${encodeURIComponent(currentUserId)}`
+                    : '/api/l2/graph';
+                const res = await fetch(url);
                 const data = await res.json();
                 
                 renderGraph(data);
@@ -862,11 +1042,11 @@
             ]);
         }
 
-        // Initial load
-        refreshAll();
-        
-        // Auto-refresh disabled - use manual refresh button instead
-        // setInterval(refreshAll, 60000);
+        // Initial load - load users first, then refresh data
+        (async function init() {
+            await loadUsers();
+            await refreshAll();
+        })();
 
         // Handle window resize
         window.addEventListener('resize', () => {

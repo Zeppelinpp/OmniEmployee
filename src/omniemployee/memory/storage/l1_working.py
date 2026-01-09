@@ -28,12 +28,19 @@ class L1WorkingMemory(StorageBackend):
     
     Maintains Top-K high-energy nodes relevant to current task.
     Automatically evicts low-energy or stale nodes.
+    Supports multi-user isolation via user_id filtering.
     """
     
     def __init__(self, config: L1Config | None = None):
         self.config = config or L1Config()
         self._nodes: dict[str, MemoryNode] = {}
         self._connected = False
+    
+    def _filter_by_user(self, nodes: list[MemoryNode], user_id: str = "") -> list[MemoryNode]:
+        """Filter nodes by user_id. Empty user_id returns all nodes."""
+        if not user_id:
+            return nodes
+        return [n for n in nodes if n.user_id == user_id]
     
     async def connect(self) -> None:
         """Initialize the working memory."""
@@ -73,32 +80,33 @@ class L1WorkingMemory(StorageBackend):
     async def exists(self, node_id: str) -> bool:
         return node_id in self._nodes
     
-    async def list_all(self) -> list[MemoryNode]:
-        """List all nodes, sorted by energy (descending)."""
-        return sorted(
-            self._nodes.values(),
-            key=lambda n: n.energy,
-            reverse=True
-        )
+    async def list_all(self, user_id: str = "") -> list[MemoryNode]:
+        """List all nodes, sorted by energy (descending). Filter by user_id if provided."""
+        nodes = self._filter_by_user(list(self._nodes.values()), user_id)
+        return sorted(nodes, key=lambda n: n.energy, reverse=True)
     
-    async def count(self) -> int:
-        return len(self._nodes)
+    async def count(self, user_id: str = "") -> int:
+        """Count nodes. Filter by user_id if provided."""
+        if not user_id:
+            return len(self._nodes)
+        return len([n for n in self._nodes.values() if n.user_id == user_id])
     
     async def clear(self) -> None:
         self._nodes.clear()
     
-    async def get_top_k(self, k: int) -> list[MemoryNode]:
-        """Get top K highest-energy nodes."""
-        nodes = list(self._nodes.values())
+    async def get_top_k(self, k: int, user_id: str = "") -> list[MemoryNode]:
+        """Get top K highest-energy nodes. Filter by user_id if provided."""
+        nodes = self._filter_by_user(list(self._nodes.values()), user_id)
         return heapq.nlargest(k, nodes, key=lambda n: n.energy)
     
-    async def get_by_energy_threshold(self, min_energy: float) -> list[MemoryNode]:
-        """Get all nodes above energy threshold."""
-        return [n for n in self._nodes.values() if n.energy >= min_energy]
+    async def get_by_energy_threshold(self, min_energy: float, user_id: str = "") -> list[MemoryNode]:
+        """Get all nodes above energy threshold. Filter by user_id if provided."""
+        nodes = self._filter_by_user(list(self._nodes.values()), user_id)
+        return [n for n in nodes if n.energy >= min_energy]
     
-    async def get_recent(self, limit: int = 10) -> list[MemoryNode]:
-        """Get most recently accessed nodes."""
-        nodes = list(self._nodes.values())
+    async def get_recent(self, limit: int = 10, user_id: str = "") -> list[MemoryNode]:
+        """Get most recently accessed nodes. Filter by user_id if provided."""
+        nodes = self._filter_by_user(list(self._nodes.values()), user_id)
         return sorted(nodes, key=lambda n: n.last_accessed, reverse=True)[:limit]
     
     async def update_energy(self, node_id: str, new_energy: float) -> bool:
@@ -177,9 +185,11 @@ class L1WorkingMemory(StorageBackend):
         
         return removed
     
-    def get_stats(self) -> dict[str, Any]:
-        """Get statistics about working memory state."""
-        if not self._nodes:
+    def get_stats(self, user_id: str = "") -> dict[str, Any]:
+        """Get statistics about working memory state. Filter by user_id if provided."""
+        nodes = self._filter_by_user(list(self._nodes.values()), user_id) if user_id else list(self._nodes.values())
+        
+        if not nodes:
             return {
                 "count": 0,
                 "capacity": self.config.max_nodes,
@@ -189,11 +199,11 @@ class L1WorkingMemory(StorageBackend):
                 "max_energy": 0.0,
             }
         
-        energies = [n.energy for n in self._nodes.values()]
+        energies = [n.energy for n in nodes]
         return {
-            "count": len(self._nodes),
+            "count": len(nodes),
             "capacity": self.config.max_nodes,
-            "usage_percent": len(self._nodes) / self.config.max_nodes * 100,
+            "usage_percent": len(nodes) / self.config.max_nodes * 100,
             "avg_energy": sum(energies) / len(energies),
             "min_energy": min(energies),
             "max_energy": max(energies),

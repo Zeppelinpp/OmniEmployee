@@ -25,6 +25,8 @@ class KnowledgeSource(str, Enum):
     USER_CORRECTION = "user_correction"  # User corrected agent's info
     USER_VERIFIED = "user_verified"   # User confirmed an update
     AGENT_INFERRED = "agent_inferred" # Agent inferred from context
+    AGENT_SEARCH = "agent_search"     # From agent's web search results
+    AGENT_SUMMARY = "agent_summary"   # Agent's summary of external info
 
 
 @dataclass

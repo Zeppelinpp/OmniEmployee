@@ -7,6 +7,7 @@ triggering confirmation or restructuring actions.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 from typing import Callable, Awaitable, Any
 from dataclasses import dataclass
 
@@ -17,28 +18,21 @@ from src.omniemployee.memory.models import (
 )
 
 
-# Prompt template for LLM conflict verification
-CONFLICT_VERIFY_PROMPT = """Analyze whether these two memory statements contain conflicting information.
+def _load_conflict_prompt() -> str:
+    """Load conflict verification prompt from file."""
+    prompt_path = Path(__file__).parent.parent.parent.parent / "prompts" / "memory_conflict_verify.md"
+    if prompt_path.exists():
+        return prompt_path.read_text(encoding="utf-8")
+    # Fallback prompt
+    return """Analyze whether these two memory statements conflict.
 
-Statement A (existing):
-{content_a}
+Statement A: {content_a}
+Statement B: {content_b}
 
-Statement B (new):
-{content_b}
+Respond in JSON: {{"is_conflict": bool, "conflict_type": str, "description": str, "confidence": float}}"""
 
-Determine if they:
-1. Contradict each other (opposing facts)
-2. One updates/supersedes the other
-3. One refines/adds detail to the other
-4. No conflict (compatible information)
 
-Respond in JSON format:
-{{
-    "is_conflict": true/false,
-    "conflict_type": "contradiction" | "update" | "refinement" | "none",
-    "description": "Brief explanation of the conflict or compatibility",
-    "confidence": 0.0-1.0
-}}"""
+CONFLICT_VERIFY_PROMPT = _load_conflict_prompt()
 
 
 @dataclass

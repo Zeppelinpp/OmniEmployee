@@ -17,8 +17,9 @@ from src.omniemployee.memory.knowledge.models import (
 
 
 # SQL for creating knowledge tables
+# NOTE: Knowledge is GLOBAL - shared across all users (unlike Memory which is per-user)
 CREATE_KNOWLEDGE_TABLES_SQL = """
--- Knowledge triples table
+-- Knowledge triples table (GLOBAL - not user-specific)
 CREATE TABLE IF NOT EXISTS knowledge_triples (
     id UUID PRIMARY KEY,
     subject VARCHAR(255) NOT NULL,
@@ -29,12 +30,12 @@ CREATE TABLE IF NOT EXISTS knowledge_triples (
     version INT DEFAULT 1,
     previous_values JSONB DEFAULT '[]',
     session_id VARCHAR(64) DEFAULT '',
-    user_id VARCHAR(64) DEFAULT '',
+    user_id VARCHAR(64) DEFAULT '',  -- Who contributed this knowledge (for attribution)
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     
-    -- Unique constraint on (subject, predicate) per user
-    UNIQUE(user_id, subject, predicate)
+    -- GLOBAL unique constraint: same fact exists only once across all users
+    UNIQUE(subject, predicate)
 );
 
 -- Knowledge update history
@@ -46,13 +47,13 @@ CREATE TABLE IF NOT EXISTS knowledge_history (
     reason VARCHAR(64),
     confirmed BOOLEAN DEFAULT false,
     session_id VARCHAR(64) DEFAULT '',
+    contributor_id VARCHAR(64) DEFAULT '',  -- Who made this update
     timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON knowledge_triples(subject);
 CREATE INDEX IF NOT EXISTS idx_triples_predicate ON knowledge_triples(predicate);
-CREATE INDEX IF NOT EXISTS idx_triples_user ON knowledge_triples(user_id);
 CREATE INDEX IF NOT EXISTS idx_triples_updated ON knowledge_triples(updated_at);
 CREATE INDEX IF NOT EXISTS idx_history_triple ON knowledge_history(triple_id);
 
@@ -61,6 +62,31 @@ CREATE INDEX IF NOT EXISTS idx_triples_fts
 ON knowledge_triples USING gin(
     to_tsvector('english', subject || ' ' || object)
 );
+"""
+
+# Migration SQL for existing databases
+KNOWLEDGE_MIGRATION_SQL = """
+-- Drop old user-based unique constraint if exists, create new global one
+DO $$
+BEGIN
+    -- Try to drop old constraint (may not exist in new installations)
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'knowledge_triples_user_id_subject_predicate_key') THEN
+        ALTER TABLE knowledge_triples DROP CONSTRAINT knowledge_triples_user_id_subject_predicate_key;
+    END IF;
+    
+    -- Create new global unique constraint if not exists
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'knowledge_triples_subject_predicate_key') THEN
+        ALTER TABLE knowledge_triples ADD CONSTRAINT knowledge_triples_subject_predicate_key UNIQUE (subject, predicate);
+    END IF;
+    
+    -- Add contributor_id column to history if not exists
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='knowledge_history' AND column_name='contributor_id') THEN
+        ALTER TABLE knowledge_history ADD COLUMN contributor_id VARCHAR(64) DEFAULT '';
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    -- Ignore errors during migration
+    NULL;
+END $$;
 """
 
 
@@ -112,6 +138,8 @@ class KnowledgeStore:
         # Create tables
         async with self._pool.acquire() as conn:
             await conn.execute(CREATE_KNOWLEDGE_TABLES_SQL)
+            # Run migration for existing databases
+            await conn.execute(KNOWLEDGE_MIGRATION_SQL)
         
         self._connected = True
     
@@ -130,7 +158,8 @@ class KnowledgeStore:
     async def store(self, triple: KnowledgeTriple) -> str:
         """Store a new knowledge triple.
         
-        If triple with same (user_id, subject, predicate) exists, updates it.
+        Knowledge is GLOBAL: if triple with same (subject, predicate) exists,
+        updates it regardless of who contributed it.
         
         Returns:
             The triple ID
@@ -143,10 +172,10 @@ class KnowledgeStore:
                     version, previous_values, session_id, user_id
                 )
                 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
-                ON CONFLICT (user_id, subject, predicate) 
+                ON CONFLICT (subject, predicate) 
                 DO UPDATE SET
                     object = EXCLUDED.object,
-                    confidence = EXCLUDED.confidence,
+                    confidence = GREATEST(knowledge_triples.confidence, EXCLUDED.confidence),
                     source = EXCLUDED.source,
                     version = knowledge_triples.version + 1,
                     previous_values = knowledge_triples.previous_values || 
@@ -163,7 +192,7 @@ class KnowledgeStore:
                 triple.version,
                 json.dumps(triple.previous_values),
                 triple.session_id,
-                triple.user_id,
+                triple.user_id,  # Who contributed this knowledge
             )
             return str(row["id"])
     
@@ -182,18 +211,19 @@ class KnowledgeStore:
         self,
         subject: str,
         predicate: str,
-        user_id: str = "",
     ) -> KnowledgeTriple | None:
-        """Get triple by subject and predicate (exact match)."""
+        """Get triple by subject and predicate (exact match).
+        
+        Knowledge is global, so no user_id filtering.
+        """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT * FROM knowledge_triples
                 WHERE LOWER(subject) = LOWER($1)
                   AND LOWER(predicate) = LOWER($2)
-                  AND user_id = $3
                 """,
-                subject, predicate, user_id
+                subject, predicate
             )
             if row:
                 return self._row_to_triple(row)
@@ -273,38 +303,36 @@ class KnowledgeStore:
     async def query_by_subject(
         self,
         subject: str,
-        user_id: str = "",
         limit: int = 20,
     ) -> list[KnowledgeTriple]:
-        """Get all triples for a subject."""
+        """Get all triples for a subject (global knowledge)."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM knowledge_triples
-                WHERE LOWER(subject) = LOWER($1) AND user_id = $2
-                ORDER BY updated_at DESC
-                LIMIT $3
+                WHERE LOWER(subject) = LOWER($1)
+                ORDER BY confidence DESC, updated_at DESC
+                LIMIT $2
                 """,
-                subject, user_id, limit
+                subject, limit
             )
             return [self._row_to_triple(row) for row in rows]
     
     async def query_by_predicate(
         self,
         predicate: str,
-        user_id: str = "",
         limit: int = 20,
     ) -> list[KnowledgeTriple]:
-        """Get all triples with a specific predicate."""
+        """Get all triples with a specific predicate (global knowledge)."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM knowledge_triples
-                WHERE LOWER(predicate) = LOWER($1) AND user_id = $2
-                ORDER BY updated_at DESC
-                LIMIT $3
+                WHERE LOWER(predicate) = LOWER($1)
+                ORDER BY confidence DESC, updated_at DESC
+                LIMIT $2
                 """,
-                predicate, user_id, limit
+                predicate, limit
             )
             return [self._row_to_triple(row) for row in rows]
     
@@ -412,19 +440,18 @@ class KnowledgeStore:
     ) -> list[KnowledgeTriple]:
         """Find existing triples that might conflict with a new triple.
         
-        Looks for triples with same subject and similar predicates.
+        Knowledge is global, so conflicts are checked across all triples.
         """
         async with self._pool.acquire() as conn:
-            # Exact match on subject and predicate
+            # Exact match on subject and predicate with different object
             rows = await conn.fetch(
                 """
                 SELECT * FROM knowledge_triples
                 WHERE LOWER(subject) = LOWER($1)
                   AND LOWER(predicate) = LOWER($2)
-                  AND user_id = $3
-                  AND LOWER(object) != LOWER($4)
+                  AND LOWER(object) != LOWER($3)
                 """,
-                triple.subject, triple.predicate, triple.user_id, triple.object
+                triple.subject, triple.predicate, triple.object
             )
             return [self._row_to_triple(row) for row in rows]
     

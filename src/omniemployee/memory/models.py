@@ -98,6 +98,7 @@ class MemoryNode:
     created_at: float = field(default_factory=time.time)
     tier: str = "L1"            # Current storage tier: L1/L2/L3
     links: list[Link] = field(default_factory=list)
+    user_id: str = ""           # Owner user ID for multi-user isolation
     
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for storage."""
@@ -112,6 +113,7 @@ class MemoryNode:
             "created_at": self.created_at,
             "tier": self.tier,
             "links": [link.to_dict() for link in self.links],
+            "user_id": self.user_id,
         }
     
     @classmethod
@@ -130,6 +132,7 @@ class MemoryNode:
             created_at=data.get("created_at", time.time()),
             tier=data.get("tier", "L1"),
             links=links,
+            user_id=data.get("user_id", ""),
         )
     
     def to_json(self) -> str:
@@ -219,6 +222,7 @@ class CrystalFact:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    user_id: str = ""  # Owner user ID for multi-user isolation
     
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

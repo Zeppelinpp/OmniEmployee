@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS crystal_facts (
     confidence FLOAT DEFAULT 1.0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    metadata JSONB DEFAULT '{}'
+    metadata JSONB DEFAULT '{}',
+    user_id VARCHAR(64) DEFAULT ''
 );
 
 -- Crystal links table (persisted relationships)
@@ -47,19 +48,37 @@ CREATE TABLE IF NOT EXISTS crystal_links (
     link_type VARCHAR(16) NOT NULL,
     weight FLOAT DEFAULT 1.0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
+    user_id VARCHAR(64) DEFAULT '',
     UNIQUE(source_id, target_id, link_type)
 );
 
 -- Indexes for efficient queries
 CREATE INDEX IF NOT EXISTS idx_facts_created ON crystal_facts(created_at);
 CREATE INDEX IF NOT EXISTS idx_facts_confidence ON crystal_facts(confidence);
+CREATE INDEX IF NOT EXISTS idx_facts_user ON crystal_facts(user_id);
 CREATE INDEX IF NOT EXISTS idx_links_source ON crystal_links(source_id);
 CREATE INDEX IF NOT EXISTS idx_links_target ON crystal_links(target_id);
 CREATE INDEX IF NOT EXISTS idx_links_type ON crystal_links(link_type);
+CREATE INDEX IF NOT EXISTS idx_links_user ON crystal_links(user_id);
 
 -- Full-text search index on content
 CREATE INDEX IF NOT EXISTS idx_facts_content_fts 
 ON crystal_facts USING gin(to_tsvector('english', content));
+"""
+
+# Migration SQL to add user_id columns if they don't exist
+MIGRATION_SQL = """
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='crystal_facts' AND column_name='user_id') THEN
+        ALTER TABLE crystal_facts ADD COLUMN user_id VARCHAR(64) DEFAULT '';
+        CREATE INDEX IF NOT EXISTS idx_facts_user ON crystal_facts(user_id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='crystal_links' AND column_name='user_id') THEN
+        ALTER TABLE crystal_links ADD COLUMN user_id VARCHAR(64) DEFAULT '';
+        CREATE INDEX IF NOT EXISTS idx_links_user ON crystal_links(user_id);
+    END IF;
+END $$;
 """
 
 
@@ -97,6 +116,8 @@ class L3CrystalStorage:
         # Create tables if not exist
         async with self._pool.acquire() as conn:
             await conn.execute(CREATE_TABLES_SQL)
+            # Run migration to add user_id columns if needed
+            await conn.execute(MIGRATION_SQL)
         
         self._connected = True
     
@@ -113,15 +134,16 @@ class L3CrystalStorage:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                INSERT INTO crystal_facts (id, content, source_node_ids, confidence, metadata)
-                VALUES ($1::uuid, $2, $3::uuid[], $4, $5::jsonb)
+                INSERT INTO crystal_facts (id, content, source_node_ids, confidence, metadata, user_id)
+                VALUES ($1::uuid, $2, $3::uuid[], $4, $5::jsonb, $6)
                 RETURNING id
                 """,
                 fact.id,
                 fact.content,
                 fact.source_node_ids,
                 fact.confidence,
-                json.dumps(fact.metadata)
+                json.dumps(fact.metadata),
+                fact.user_id
             )
             return str(row["id"])
     
@@ -237,21 +259,22 @@ class L3CrystalStorage:
     
     # ==================== Crystal Links Operations ====================
     
-    async def store_link(self, link: Link) -> str:
+    async def store_link(self, link: Link, user_id: str = "") -> str:
         """Store a persistent link."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                INSERT INTO crystal_links (source_id, target_id, link_type, weight)
-                VALUES ($1::uuid, $2::uuid, $3, $4)
+                INSERT INTO crystal_links (source_id, target_id, link_type, weight, user_id)
+                VALUES ($1::uuid, $2::uuid, $3, $4, $5)
                 ON CONFLICT (source_id, target_id, link_type) 
-                DO UPDATE SET weight = EXCLUDED.weight
+                DO UPDATE SET weight = EXCLUDED.weight, user_id = EXCLUDED.user_id
                 RETURNING id
                 """,
                 link.source_id,
                 link.target_id,
                 link.link_type.value,
-                link.weight
+                link.weight,
+                user_id,
             )
             return str(row["id"])
     
@@ -315,30 +338,52 @@ class L3CrystalStorage:
     
     # ==================== Bulk Query Methods ====================
     
-    async def get_all_facts(self, limit: int = 100) -> list[CrystalFact]:
-        """Get all facts (limited)."""
+    async def get_all_facts(self, limit: int = 100, user_id: str = "") -> list[CrystalFact]:
+        """Get all facts (limited). Filter by user_id if provided."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT * FROM crystal_facts
-                ORDER BY created_at DESC
-                LIMIT $1
-                """,
-                limit
-            )
+            if user_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM crystal_facts
+                    WHERE user_id = $2
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    limit, user_id
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM crystal_facts
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    limit
+                )
             return [self._row_to_fact(row) for row in rows]
     
-    async def get_all_links(self, limit: int = 100) -> list[Link]:
-        """Get all links (limited)."""
+    async def get_all_links(self, limit: int = 100, user_id: str = "") -> list[Link]:
+        """Get all links (limited). Filter by user_id if provided."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT * FROM crystal_links
-                ORDER BY created_at DESC
-                LIMIT $1
-                """,
-                limit
-            )
+            if user_id:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM crystal_links
+                    WHERE user_id = $2
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    limit, user_id
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM crystal_links
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    limit
+                )
             return [self._row_to_link(row) for row in rows]
     
     # ==================== Utility Methods ====================
@@ -372,7 +417,8 @@ class L3CrystalStorage:
             confidence=row["confidence"],
             created_at=row["created_at"].timestamp(),
             updated_at=row["updated_at"].timestamp(),
-            metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+            metadata=json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"],
+            user_id=row.get("user_id", "")
         )
     
     def _row_to_link(self, row) -> Link:

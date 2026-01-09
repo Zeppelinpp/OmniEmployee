@@ -13,6 +13,46 @@ BIEM 是一个模拟人类记忆机制的多层级记忆系统，具有以下核
 - **冲突检测**：识别新旧信息之间的认知失调
 - **层级流动**：记忆在不同层级间根据"热度"自动升降
 - **知识学习**：从对话中抽取结构化三元组知识，支持更新和冲突检测
+- **用户隔离**：记忆按用户隔离，每个用户有独立的记忆空间
+- **全局知识**：知识库全局共享，所有用户贡献和访问同一知识图谱
+
+### 数据隔离模型
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    BIEM 数据隔离架构                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────────┐  ┌─────────────────┐                   │
+│  │   User A 👤     │  │   User B 👤     │   Per-User        │
+│  │  ┌───────────┐  │  │  ┌───────────┐  │   Memory          │
+│  │  │ L1 Cache  │  │  │  │ L1 Cache  │  │   Isolation       │
+│  │  │ L2 Vector │  │  │  │ L2 Vector │  │                   │
+│  │  │ L2 Graph  │  │  │  │ L2 Graph  │  │                   │
+│  │  │ L3 Crystal│  │  │  │ L3 Crystal│  │                   │
+│  │  └───────────┘  │  │  └───────────┘  │                   │
+│  └─────────────────┘  └─────────────────┘                   │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              Knowledge Base 🌐                       │    │
+│  │         (Global, Shared Across All Users)           │    │
+│  │                                                     │    │
+│  │   ┌───────────────────────────────────────────┐    │    │
+│  │   │  (Python, created_by, Guido van Rossum)   │    │    │
+│  │   │  (GPT-4, context_window, 128k tokens)     │    │    │
+│  │   │  (Machine Learning, subset_of, AI)        │    │    │
+│  │   └───────────────────────────────────────────┘    │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+| 数据类型 | 隔离模式 | 说明 |
+|----------|----------|------|
+| **记忆 (Memory)** | 👤 Per-User | L1/L2/L3 全部按 `user_id` 隔离 |
+| **知识 (Knowledge)** | 🌐 Global | 所有用户共享同一知识库 |
 
 ### 系统架构总览
 
@@ -27,16 +67,18 @@ subgraph "Agent Runtime"
   CONTEXT --> LLM[LLM 调用]
   LLM --> RESPONSE[响应输出]
   RESPONSE --> RECORD[记录到记忆]
+  RESPONSE --> KLEARN[知识抽取]
 end
-subgraph "Memory Tiers"
+subgraph "Memory Tiers (Per-User 👤)"
   MM --> L1[L1 Working Canvas<br/>Python Dict]
-  MM --> L2V[L2 Vector Storage<br/>Milvus]
-  MM --> L2G[L2 Graph Storage<br/>NetworkX]
-  MM --> L3[L3 Crystal<br/>PostgreSQL]
+  MM --> L2V[L2 Vector Storage<br/>Milvus + user_id]
+  MM --> L2G[L2 Graph Storage<br/>NetworkX per user]
+  MM --> L3[L3 Crystal<br/>PostgreSQL + user_id]
 end
-subgraph "Knowledge Storage"
+subgraph "Knowledge Storage (Global 🌐)"
   KL --> KPG[(PostgreSQL<br/>knowledge_triples)]
   KL --> KMV[(Milvus<br/>biem_knowledge)]
+  KLEARN --> KL
 end
 subgraph "Operators"
   MM --> ENC[Encoder<br/>Ollama BGE-M3]
@@ -48,8 +90,8 @@ style L1 fill:#ff6b6b,color:#fff
 style L2V fill:#4ecdc4,color:#fff
 style L2G fill:#45b7d1,color:#fff
 style L3 fill:#96ceb4,color:#fff
-style KPG fill:#96ceb4,color:#fff
-style KMV fill:#4ecdc4,color:#fff
+style KPG fill:#a8e6cf,color:#333
+style KMV fill:#a8e6cf,color:#333
 ```
 
 ---
@@ -132,8 +174,9 @@ G1 -->|传播激活| EXPAND[扩展召回]
 
 **数据模式**：
 ```sql
--- Milvus Collection Schema
+-- Milvus Collection Schema (biem_memories)
 id VARCHAR(64) PRIMARY KEY        -- UUID
+user_id VARCHAR(64)              -- 用户 ID (隔离键)
 content VARCHAR(65535)           -- 原文内容
 vector FLOAT_VECTOR(1024)        -- BGE-M3 嵌入
 energy FLOAT                     -- 能量值 [0,1]
@@ -142,6 +185,8 @@ last_accessed INT64              -- 最后访问时间
 tier VARCHAR(8)                  -- 当前层级
 sentiment FLOAT                  -- 情感极性 [-1,1]
 ```
+
+**查询过滤**：所有向量检索都包含 `user_id == "{current_user}"` 过滤条件
 
 #### L2-Graph (NetworkX)
 
@@ -180,22 +225,29 @@ STARTUP[系统启动] -->|恢复| GRAPH
 ```sql
 CREATE TABLE crystal_facts (
   id UUID PRIMARY KEY,
+  user_id VARCHAR(64) DEFAULT '',   -- 用户隔离
   content TEXT NOT NULL,
-  source_node_ids TEXT[],
+  source_node_ids UUID[] DEFAULT '{}',
   confidence FLOAT DEFAULT 1.0,
-  created_at TIMESTAMP,
-  updated_at TIMESTAMP,
-  metadata JSONB
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}'
 );
+
+CREATE INDEX idx_facts_user ON crystal_facts(user_id);
+
 CREATE TABLE crystal_links (
-  id SERIAL PRIMARY KEY,
-  source_id VARCHAR(64),
-  target_id VARCHAR(64),
-  link_type VARCHAR(16),
+  id UUID PRIMARY KEY,
+  user_id VARCHAR(64) DEFAULT '',   -- 用户隔离
+  source_id UUID NOT NULL,
+  target_id UUID NOT NULL,
+  link_type VARCHAR(16) NOT NULL,
   weight FLOAT DEFAULT 1.0,
-  created_at TIMESTAMP,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(source_id, target_id, link_type)
 );
+
+CREATE INDEX idx_links_user ON crystal_links(user_id);
 ```
 
 ---
@@ -208,6 +260,7 @@ CREATE TABLE crystal_links (
 classDiagram
 class MemoryNode {
   +id: str
+  +user_id: str
   +content: str
   +vector: list~float~
   +metadata: MemoryMetadata
@@ -235,10 +288,16 @@ class Link {
   +link_type: LinkType
   +weight: float
   +created_at: float
+  +user_id: str
 }
 MemoryNode --> MemoryMetadata
 MemoryNode --> Link
 ```
+
+**用户隔离**：
+- `user_id` 字段用于区分不同用户的记忆
+- 所有存储层（L1/L2/L3）都按 `user_id` 过滤
+- 切换用户后，只能访问该用户的记忆数据
 
 ### 能量公式
 
@@ -609,33 +668,58 @@ USER[用户反馈] --> FEEDBACK
 
 BIEM 记忆系统的扩展模块，从对话中抽取结构化知识三元组，支持知识更新和冲突检测。
 
+### 核心设计原则
+
+| 特性 | 说明 |
+|------|------|
+| **🌐 全局共享** | 知识库在所有用户之间共享，形成集体知识图谱 |
+| **🚫 严格过滤** | 只抽取客观事实，拒绝用户个人信息 |
+| **🔗 簇扩散召回** | 语义检索后扩散到相关知识簇 |
+| **🤖 Agent 贡献** | Agent 也可从自己的回复中提取知识 |
+
+### 知识抽取原则
+
+**✅ 应该抽取的知识**：
+- 客观事实：`(Python, created_by, Guido van Rossum)`
+- 技术概念：`(Machine Learning, is_subset_of, Artificial Intelligence)`
+- 流程描述：`(Gradient Descent, used_for, Neural Network Training)`
+
+**❌ 不应该抽取的知识**：
+- 用户个人信息：~~`(user, age, 25)`~~
+- 用户偏好：~~`(user, prefers, dark_mode)`~~
+- 用户位置：~~`(user, lives_in, Beijing)`~~
+- 主观观点：~~`(user, thinks, Python is better)`~~
+
 ### 系统架构
 
 ```mermaid
 graph TB
 subgraph "对话输入"
   USER[用户消息] --> PLUGIN[KnowledgeLearningPlugin]
+  AGENT[Agent 回复] --> PLUGIN
 end
-subgraph "知识抽取"
+subgraph "知识抽取 (Strict)"
   PLUGIN --> EXTRACT[KnowledgeExtractor<br/>LLM 驱动]
-  EXTRACT -->|JSON| TRIPLES[三元组列表]
+  EXTRACT -->|JSON| FILTER[严格过滤器]
+  FILTER -->|过滤用户信息| TRIPLES[三元组列表]
 end
-subgraph "冲突检测"
+subgraph "冲突检测 (Global)"
   TRIPLES --> CONFLICT[ConflictDetector]
   CONFLICT -->|无冲突| STORE[直接存储]
   CONFLICT -->|有冲突| CONFIRM[ConfirmationManager]
   CONFIRM -->|用户确认| UPDATE[更新知识]
   CONFIRM -->|用户拒绝| KEEP[保留原知识]
 end
-subgraph "存储层"
-  STORE --> PG[(PostgreSQL<br/>knowledge_triples)]
+subgraph "存储层 (Global 🌐)"
+  STORE --> PG[(PostgreSQL<br/>knowledge_triples<br/>UNIQUE subject,predicate)]
   UPDATE --> PG
   STORE --> MV[(Milvus<br/>向量索引)]
   PG --> HISTORY[(knowledge_history<br/>版本历史)]
 end
 style EXTRACT fill:#ff6188,color:#fff
-style PG fill:#96ceb4,color:#fff
-style MV fill:#4ecdc4,color:#fff
+style FILTER fill:#ffd93d,color:#333
+style PG fill:#a8e6cf,color:#333
+style MV fill:#a8e6cf,color:#333
 ```
 
 ### 知识三元组 (KnowledgeTriple)
@@ -646,7 +730,7 @@ style MV fill:#4ecdc4,color:#fff
 @dataclass
 class KnowledgeTriple:
   id: str                     # UUID
-  subject: str                # 主体: "GPT-4", "Python"
+  subject: str                # 主体: "GPT-4", "Python" (不允许 "user")
   predicate: str              # 关系: "context_window", "created_by"
   object: str                 # 客体: "128k tokens", "Guido"
   confidence: float = 0.8     # 置信度 0.0~1.0
@@ -654,17 +738,23 @@ class KnowledgeTriple:
   version: int = 1            # 版本号 (更新时递增)
   previous_values: list[str]  # 历史值
   session_id: str             # 创建 Session
-  user_id: str                # 所属用户 (多用户隔离)
+  user_id: str                # 贡献者 ID (归因，非隔离)
   created_at: float           # 创建时间戳
   updated_at: float           # 更新时间戳
   vector: list[float]         # 向量嵌入 (语义检索)
 ```
+
+**全局唯一约束**：`UNIQUE(subject, predicate)` — 同一主体的同一关系只有一个值
 
 | Subject | Predicate | Object |
 |---------|-----------|--------|
 | GPT-4 | context_window | 128k tokens |
 | Python | created_by | Guido van Rossum |
 | Claude 3.5 | max_output | 8k tokens |
+
+**禁止的 Subject**：
+- `user` — 不允许以用户为主体的三元组
+- 任何个人信息相关的主体
 
 ### 知识意图 (KnowledgeIntent)
 
@@ -684,8 +774,10 @@ class KnowledgeSource(str, Enum):
   USER_STATED = "user_stated"         # 用户明确陈述
   USER_CORRECTION = "user_correction" # 用户纠正
   USER_VERIFIED = "user_verified"     # 用户确认更新
-  AGENT_INFERRED = "agent_inferred"   # Agent 推断
+  AGENT_INFERRED = "agent_inferred"   # Agent 从回复/搜索结果中推断
 ```
+
+**Agent 知识贡献**：Agent 在回答问题时（如通过网络搜索获取信息），也会从自己的回复中抽取知识并存入全局知识库。
 
 ### 抽取结果 (ExtractionResult)
 
@@ -794,37 +886,102 @@ subgraph "Context 注入"
 end
 ```
 
+### 簇扩散召回 (Cluster Expansion)
+
+知识检索支持"簇扩散"机制，在初始语义匹配后，扩展到相关知识簇：
+
+```mermaid
+graph TB
+subgraph "Stage 1: 初始检索"
+  QUERY[查询向量] --> SEARCH[Milvus 向量搜索]
+  SEARCH --> TOP_K[Top K 结果]
+end
+subgraph "Stage 2: 簇扩散"
+  TOP_K --> EXPAND[对每个结果扩展搜索]
+  EXPAND --> CLUSTER1[相关簇 1]
+  EXPAND --> CLUSTER2[相关簇 2]
+  EXPAND --> CLUSTER3[相关簇 3]
+end
+subgraph "融合排序"
+  TOP_K --> MERGE[合并去重]
+  CLUSTER1 --> MERGE
+  CLUSTER2 --> MERGE
+  CLUSTER3 --> MERGE
+  MERGE --> FINAL[最终结果<br/>按综合分数排序]
+end
+style TOP_K fill:#4ecdc4,color:#fff
+style CLUSTER1 fill:#a8e6cf,color:#333
+style CLUSTER2 fill:#a8e6cf,color:#333
+style CLUSTER3 fill:#a8e6cf,color:#333
+```
+
+**扩散算法**：
+```python
+async def search_with_cluster_expansion(
+    query: str,
+    top_k: int = 5,           # 初始检索数量
+    expansion_k: int = 3,      # 每个结果扩展数量
+    min_score: float = 0.5,    # 初始结果最低分数
+    expansion_min_score: float = 0.4  # 扩展结果最低分数
+) -> list[tuple[str, float]]:
+    # 1. 初始向量检索
+    initial_results = vector_search(query, top_k)
+    
+    # 2. 对每个初始结果进行扩展搜索
+    for result in initial_results:
+        cluster_results = vector_search(result.vector, expansion_k)
+        # 扩展结果权重降低 (× 0.7)
+        merge_with_lower_weight(cluster_results)
+    
+    # 3. 去重并按综合分数排序
+    return deduplicate_and_sort()
+```
+
+**效果**：查询"神经网络"时，不仅返回直接相关的知识，还会扩散到"反向传播"、"梯度下降"、"激活函数"等相关知识簇。
+
 ### 数据库 Schema
 
 ```sql
--- 知识三元组表
+-- 知识三元组表 (全局共享)
 CREATE TABLE knowledge_triples (
   id UUID PRIMARY KEY,
   subject VARCHAR(255) NOT NULL,
   predicate VARCHAR(255) NOT NULL,
   object TEXT NOT NULL,
   confidence FLOAT DEFAULT 0.8,
-  source VARCHAR(32),
+  source VARCHAR(32) DEFAULT 'conversation',
   version INT DEFAULT 1,
   previous_values JSONB DEFAULT '[]',
-  user_id VARCHAR(64),
-  session_id VARCHAR(64),
+  user_id VARCHAR(64) DEFAULT '',     -- 贡献者 ID (归因，非隔离)
+  session_id VARCHAR(64) DEFAULT '',
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(user_id, subject, predicate)
+  
+  -- 全局唯一约束 (不按用户隔离)
+  UNIQUE(subject, predicate)
 );
+
+CREATE INDEX idx_triples_subject ON knowledge_triples(subject);
+CREATE INDEX idx_triples_predicate ON knowledge_triples(predicate);
+
 -- 知识更新历史表
 CREATE TABLE knowledge_history (
   id UUID PRIMARY KEY,
-  triple_id UUID REFERENCES knowledge_triples(id),
+  triple_id UUID REFERENCES knowledge_triples(id) ON DELETE CASCADE,
   old_value TEXT,
   new_value TEXT,
   reason VARCHAR(64),
   confirmed BOOLEAN DEFAULT false,
-  session_id VARCHAR(64),
+  session_id VARCHAR(64) DEFAULT '',
+  contributor_id VARCHAR(64) DEFAULT '',  -- 贡献者
   timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 ```
+
+**关键设计**：
+- `UNIQUE(subject, predicate)` 而非 `UNIQUE(user_id, subject, predicate)`
+- 知识是全局的，任何用户都可以更新同一个三元组
+- `user_id` 仅用于追踪谁贡献了这条知识
 
 ### 与 Memory Context 的融合
 
@@ -833,27 +990,38 @@ CREATE TABLE knowledge_history (
 ```python
 # main.py 集成逻辑
 context_parts = []
+
+# 记忆上下文 (Per-User)
 if memory:
   memory_context = await memory.prepare_context(user_input)
   if memory_context:
     context_parts.append(memory_context)
+
+# 知识上下文 (Global, 使用簇扩散)
 if knowledge and knowledge.is_available():
   knowledge_context = await knowledge.get_context_for_query(user_input)
   if knowledge_context:
     context_parts.append(knowledge_context)
+
 agent.context.set_memory_context("\n\n".join(context_parts))
+
+# Agent 回复后，也从回复中抽取知识
+if knowledge:
+  await knowledge.process_message(user_input, role="user")
+  await knowledge.process_message(response, role="assistant")
 ```
 
 **最终注入格式**：
 
 ```markdown
-## Relevant Memories
+## Relevant Memories (👤 Per-User)
 1. [● E=0.85] 用户正在学习机器学习...
 Entities: 机器学习, PyTorch
 
-## Learned Knowledge
+## Learned Knowledge (🌐 Global)
 - (GPT-4, context_window, 128k tokens) [user_verified]
 - (Claude 3.5, max_output, 8k tokens) [user_stated]
+- (Gradient Descent, used_for, Neural Network Training) [agent_inferred]
 ```
 
 ### 配置参数
@@ -866,11 +1034,38 @@ class KnowledgePluginConfig:
   extractor_config: ExtractorConfig     # LLM 抽取配置
   conflict_config: ConflictConfig       # 冲突检测配置
   auto_store: bool = True               # 自动存储无冲突知识
-  extract_from_agent: bool = False      # 是否从 Agent 消息抽取
+  extract_from_agent: bool = True       # 从 Agent 消息抽取知识
   max_context_items: int = 10           # Context 中最大知识条数
   enable_vector_search: bool = True     # 启用向量语义搜索
-  user_id: str = ""                     # 用户 ID (多用户隔离)
+  enable_cluster_expansion: bool = True # 启用簇扩散召回
+  user_id: str = ""                     # 贡献者 ID (归因，非隔离)
   session_id: str = ""                  # Session ID
+```
+
+### 严格抽取过滤器
+
+```python
+# 禁止的谓词列表 (用户个人信息)
+USER_SPECIFIC_PREDICATES = frozenset({
+    "name", "age", "birthday", "birth_date",
+    "location", "address", "city", "country",
+    "email", "phone", "phone_number",
+    "job", "workplace", "employer", "occupation",
+    "preference", "ui_preference", "editor",
+    "favorite", "likes", "dislikes",
+    "hobby", "hobbies", "interest", "interests",
+    "goal", "goals", "project", "current_project", "working_on",
+})
+
+# 过滤逻辑
+def filter_triple(triple: KnowledgeTriple) -> bool:
+    # 拒绝 subject == "user"
+    if triple.subject.lower() == "user":
+        return False
+    # 拒绝用户相关谓词
+    if triple.predicate.lower() in USER_SPECIFIC_PREDICATES:
+        return False
+    return True
 ```
 
 ---
@@ -883,20 +1078,27 @@ class KnowledgePluginConfig:
 # Milvus 配置
 MILVUS_HOST=localhost
 MILVUS_PORT=19530
-MILVUS_COLLECTION=biem_memories
+MILVUS_COLLECTION=biem_memories      # 记忆向量集合 (per-user)
 MILVUS_USE_LITE=false
+# 知识向量集合名默认为 biem_knowledge (global)
+
 # PostgreSQL 配置
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_DB=biem
 POSTGRES_USER=your_user
 POSTGRES_PASSWORD=
+
 # 记忆系统开关
 DISABLE_MEMORY=false
+
 # 知识学习开关
 DISABLE_KNOWLEDGE=false
 KNOWLEDGE_VECTOR_SEARCH=true
-USER_ID=default
+KNOWLEDGE_CLUSTER_EXPANSION=true    # 启用簇扩散
+
+# 用户配置
+USER_ID=default                     # 初始用户 ID (记忆隔离用)
 ```
 
 ### 启动服务
@@ -916,13 +1118,54 @@ uv run python main.py
 
 ```bash
 # 启动 Web 可视化 (Monokai Pro 主题)
-uv run uvicorn src.omniemployee.web.app:app --port 8765
-# 访问 http://localhost:8765
+uv run uvicorn src.omniemployee.web.app:app --port 8000
+# 访问 http://localhost:8000
 ```
 
 功能包括：
-- **L1 Working Memory**: 当前工作记忆节点列表
-- **L2 Vector Storage**: 向量存储统计和节点预览
-- **L2 Graph**: D3.js 力导向图可视化节点关联
-- **L3 Facts/Links**: PostgreSQL 持久化数据表格视图
-- **Knowledge**: 学习到的知识三元组列表
+
+**记忆面板 (Per-User 👤)**：
+- **L1 Working Memory 👤**: 当前用户的工作记忆节点列表
+- **L2 Vector Storage 👤**: 当前用户的向量存储统计和节点预览
+- **L2 Graph 👤**: D3.js 力导向图可视化当前用户的节点关联
+- **L3 Facts/Links 👤**: 当前用户的 PostgreSQL 持久化数据
+
+**知识面板 (Global 🌐)**：
+- **Knowledge 🌐**: 全局共享的知识三元组列表
+
+**用户管理**：
+- 顶部下拉框切换用户
+- 创建新用户按钮
+- 切换用户后，记忆数据自动切换，知识数据保持不变
+
+### GUI 客户端
+
+```bash
+# 启动 GPUI 原生客户端
+cd gui && cargo run --release
+```
+
+功能包括：
+- 实时流式对话
+- 用户切换（头部下拉选择器）
+- 侧边栏显示 Memory 👤 和 Knowledge 🌐
+- 工具调用实时展示
+
+### 数据库重置脚本
+
+当需要清空数据或更新 Schema 时：
+
+```bash
+# 重置 Milvus 和 PostgreSQL
+uv run python scripts/reset_databases.py
+```
+
+该脚本会：
+1. 删除并重建 Milvus collections：
+   - `biem_memories` (记忆向量，含 `user_id`)
+   - `biem_knowledge` (知识向量，全局)
+2. 删除并重建 PostgreSQL 表：
+   - `crystal_facts` (L3 事实，含 `user_id`)
+   - `crystal_links` (L3 链接，含 `user_id`)
+   - `knowledge_triples` (知识三元组，全局唯一)
+   - `knowledge_history` (更新历史)

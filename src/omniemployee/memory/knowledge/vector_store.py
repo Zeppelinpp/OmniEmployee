@@ -228,3 +228,144 @@ class KnowledgeVectorStore:
             "row_count": stats.get("row_count", 0),
             "collection": self.config.collection_name,
         }
+    
+    async def search_with_cluster_expansion(
+        self,
+        query: str,
+        top_k: int = 5,
+        expansion_k: int = 3,
+        min_score: float = 0.5,
+    ) -> list[tuple[str, float]]:
+        """Search for knowledge with cluster expansion.
+        
+        1. First retrieve top_k most relevant triples
+        2. For each retrieved triple, find expansion_k related triples
+        3. Return the combined, deduplicated results
+        
+        This mimics how human knowledge recall works - activating a concept
+        also activates related concepts.
+        
+        Args:
+            query: Search query text
+            top_k: Initial retrieval count
+            expansion_k: How many related items to expand per initial result
+            min_score: Minimum similarity score (0-1)
+            
+        Returns:
+            List of (triple_id, score) tuples (deduplicated, sorted by score)
+        """
+        if not self.is_available() or not self._encoder:
+            return []
+        
+        # Step 1: Initial search
+        initial_results = await self.search(query, top_k=top_k, min_score=min_score)
+        
+        if not initial_results:
+            return []
+        
+        # Collect results with their scores (use dict for dedup)
+        all_results: dict[str, float] = {}
+        for triple_id, score in initial_results:
+            all_results[triple_id] = score
+        
+        # Step 2: Cluster expansion - for each result, find related triples
+        for triple_id, initial_score in initial_results:
+            related = await self._find_related_triples(
+                triple_id, 
+                k=expansion_k, 
+                min_score=min_score * 0.8  # Slightly lower threshold for expansion
+            )
+            
+            for related_id, related_score in related:
+                if related_id not in all_results:
+                    # Decay the score for expanded results
+                    # Score = initial_score * related_score * decay_factor
+                    expanded_score = initial_score * related_score * 0.7
+                    if expanded_score >= min_score * 0.5:  # Lower threshold for expanded
+                        all_results[related_id] = expanded_score
+                elif all_results[related_id] < related_score:
+                    # Update if found a higher score path
+                    all_results[related_id] = related_score
+        
+        # Sort by score (descending)
+        sorted_results = sorted(
+            all_results.items(), 
+            key=lambda x: x[1], 
+            reverse=True
+        )
+        
+        return sorted_results
+    
+    async def _find_related_triples(
+        self,
+        triple_id: str,
+        k: int = 3,
+        min_score: float = 0.4,
+    ) -> list[tuple[str, float]]:
+        """Find triples related to a given triple by vector similarity.
+        
+        Args:
+            triple_id: The seed triple to find related items for
+            k: Number of related triples to find
+            min_score: Minimum similarity score
+            
+        Returns:
+            List of (triple_id, score) tuples
+        """
+        if not self.is_available():
+            return []
+        
+        # Get the vector for this triple
+        try:
+            results = self._client.get(
+                collection_name=self.config.collection_name,
+                ids=[triple_id],
+                output_fields=["vector"]
+            )
+            
+            if not results or not results[0].get("vector"):
+                return []
+            
+            seed_vector = results[0]["vector"]
+            
+            # Search for similar vectors (k+1 to exclude self)
+            search_results = self._client.search(
+                collection_name=self.config.collection_name,
+                data=[seed_vector],
+                limit=k + 1,
+                output_fields=["triple_id"],
+            )
+            
+            # Parse results, excluding the seed itself
+            related = []
+            for hits in search_results:
+                for hit in hits:
+                    found_id = hit["entity"]["triple_id"]
+                    if found_id != triple_id:
+                        score = 1.0 - (hit["distance"] / 2.0)
+                        if score >= min_score:
+                            related.append((found_id, score))
+            
+            return related[:k]  # Ensure we return at most k results
+            
+        except Exception:
+            return []
+    
+    async def get_subject_cluster(
+        self,
+        subject: str,
+        limit: int = 20,
+    ) -> list[tuple[str, float]]:
+        """Get all knowledge triples related to a subject.
+        
+        This retrieves all triples that mention the subject (directly or semantically)
+        forming a knowledge cluster around that entity.
+        
+        Args:
+            subject: The subject/entity to find knowledge about
+            limit: Maximum results
+            
+        Returns:
+            List of (triple_id, score) tuples
+        """
+        return await self.search(subject, top_k=limit, min_score=0.3)
