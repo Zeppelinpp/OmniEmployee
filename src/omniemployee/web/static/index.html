@@ -666,8 +666,8 @@
                 
                 tbody.innerHTML = data.links.map(l => `
                     <tr>
-                        <td class="id-cell">${shortId(l.source_id)}</td>
-                        <td class="id-cell">${shortId(l.target_id)}</td>
+                        <td title="${l.source_id}">${l.source_content || shortId(l.source_id)}</td>
+                        <td title="${l.target_id}">${l.target_content || shortId(l.target_id)}</td>
                         <td><span class="type-badge ${l.type}">${l.type}</span></td>
                         <td>${l.weight}</td>
                     </tr>
@@ -752,20 +752,29 @@
                     g.attr('transform', event.transform);
                 }));
 
-            // Create simulation
-            simulation = d3.forceSimulation(data.nodes)
-                .force('link', d3.forceLink(data.links).id(d => d.id).distance(80))
-                .force('charge', d3.forceManyBody().strength(-200))
-                .force('center', d3.forceCenter(width / 2, height / 2))
-                .force('collision', d3.forceCollide().radius(30));
+            // Link type color mapping
+            const linkColors = {
+                'temporal': '#fc9867',   // orange
+                'semantic': '#a9dc76',   // green/cyan
+                'causal': '#ab9df2',     // purple
+                'default': '#5b595c'     // gray fallback
+            };
 
-            // Create links
+            // Create simulation with longer edge distances
+            simulation = d3.forceSimulation(data.nodes)
+                .force('link', d3.forceLink(data.links).id(d => d.id).distance(180))
+                .force('charge', d3.forceManyBody().strength(-400))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(50));
+
+            // Create links with distinct colors per type
             const link = g.append('g')
                 .selectAll('line')
                 .data(data.links)
                 .join('line')
                 .attr('class', d => `link ${d.type}`)
-                .attr('stroke-width', d => Math.sqrt(d.weight) * 2);
+                .attr('stroke', d => linkColors[d.type] || linkColors.default)
+                .attr('stroke-width', d => Math.sqrt(d.weight) * 2.5);
 
             // Create nodes
             const node = g.append('g')
@@ -856,8 +865,8 @@
         // Initial load
         refreshAll();
         
-        // Auto-refresh every 10 seconds
-        setInterval(refreshAll, 10000);
+        // Auto-refresh disabled - use manual refresh button instead
+        // setInterval(refreshAll, 60000);
 
         // Handle window resize
         window.addEventListener('resize', () => {

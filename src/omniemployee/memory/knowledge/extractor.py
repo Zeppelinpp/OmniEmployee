@@ -23,11 +23,52 @@ from src.omniemployee.memory.knowledge.models import (
 EXTRACTION_PROMPT = """You are a knowledge extraction system. Analyze the following message and extract structured knowledge.
 
 ## Task
-1. Determine if the message contains factual/objective information (not opinions, questions, or casual chat)
+1. Determine if the message contains factual information (including personal information, preferences, or objective facts)
 2. If factual, extract knowledge as triples: (subject, predicate, object)
 3. Identify the intent: statement, correction, question, or opinion
 
 ## Examples
+
+Input: "我叫蒲睿" / "My name is John"
+Output:
+```json
+{{
+  "is_factual": true,
+  "intent": "statement",
+  "triples": [
+    {{"subject": "user", "predicate": "name", "object": "蒲睿"}}
+  ],
+  "confidence": 1.0
+}}
+```
+
+Input: "I live in Beijing and work at Google"
+Output:
+```json
+{{
+  "is_factual": true,
+  "intent": "statement",
+  "triples": [
+    {{"subject": "user", "predicate": "location", "object": "Beijing"}},
+    {{"subject": "user", "predicate": "workplace", "object": "Google"}}
+  ],
+  "confidence": 0.95
+}}
+```
+
+Input: "I prefer dark mode and use Vim as my editor"
+Output:
+```json
+{{
+  "is_factual": true,
+  "intent": "statement",
+  "triples": [
+    {{"subject": "user", "predicate": "ui_preference", "object": "dark mode"}},
+    {{"subject": "user", "predicate": "editor", "object": "Vim"}}
+  ],
+  "confidence": 0.9
+}}
+```
 
 Input: "Claude 3.5 Sonnet has a context window of 200k tokens"
 Output:
@@ -92,12 +133,13 @@ Output:
 ```
 
 ## Guidelines
-- subject: The main entity (person, product, concept, etc.)
-- predicate: The relationship or attribute (use snake_case, e.g., "context_window", "created_by", "release_date")
+- subject: The main entity. Use "user" for personal information about the current user.
+- predicate: The relationship or attribute (use snake_case, e.g., "name", "location", "workplace", "preference")
 - object: The value or target entity
-- Only extract verifiable facts, not subjective opinions
+- Extract personal information the user shares about themselves (name, location, job, preferences, etc.)
+- Extract technical facts and domain knowledge
 - Correction intent indicates the user is correcting previous information
-- Set confidence based on how clear and unambiguous the statement is
+- Set confidence based on how clear and unambiguous the statement is (personal info = 1.0)
 
 ## Message to Analyze
 {message}

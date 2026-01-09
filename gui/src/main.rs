@@ -7,15 +7,18 @@ mod theme;
 
 use api::{ApiClient, KnowledgeTriple, MemoryItem, StreamEvent, ToolCall};
 use gpui::{
-    actions, div, prelude::FluentBuilder, px, size, App as GpuiApp, AppContext, Application,
-    Bounds, ClickEvent, Context, FocusHandle, FontWeight, Hsla, InputHandler, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement, Styled, TitlebarOptions, UTF16Selection, Window, WindowBounds,
+    actions, anchored, deferred, div, prelude::FluentBuilder, px, size, AppContext, Application, Bounds,
+    ClickEvent, Context, Entity, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, TitlebarOptions, Window, WindowBounds,
     WindowOptions,
 };
-use std::cell::RefCell;
-use std::ops::Range;
-use std::rc::Rc;
+use gpui_component::{
+    input::{InputState as GpuiInputState, Input, InputEvent},
+    text::TextView,
+    Root,
+};
+use regex::Regex;
 use theme::MonokaiTheme;
 
 // Define actions for keyboard handling
@@ -157,190 +160,6 @@ pub enum ToolStatus {
     Failed,
 }
 
-/// Shared input state for IME support
-#[derive(Default)]
-pub struct InputState {
-    pub text: String,
-    pub cursor_position: usize,
-    pub marked_range: Option<Range<usize>>,
-}
-
-impl InputState {
-    fn byte_offset_for_char(&self, char_pos: usize) -> usize {
-        self.text
-            .char_indices()
-            .nth(char_pos)
-            .map(|(idx, _)| idx)
-            .unwrap_or(self.text.len())
-    }
-
-    fn char_pos_from_utf16(&self, utf16_offset: usize) -> usize {
-        let mut utf16_count = 0;
-        for (i, c) in self.text.chars().enumerate() {
-            if utf16_count >= utf16_offset {
-                return i;
-            }
-            utf16_count += c.len_utf16();
-        }
-        self.text.chars().count()
-    }
-
-    fn utf16_offset_for_char(&self, char_pos: usize) -> usize {
-        self.text
-            .chars()
-            .take(char_pos)
-            .map(|c| c.len_utf16())
-            .sum()
-    }
-
-    fn insert_text(&mut self, text: &str) {
-        let byte_pos = self.byte_offset_for_char(self.cursor_position);
-        self.text.insert_str(byte_pos, text);
-        self.cursor_position += text.chars().count();
-    }
-}
-
-/// InputHandler wrapper for IME support
-pub struct AppInputHandler {
-    state: Rc<RefCell<InputState>>,
-}
-
-impl InputHandler for AppInputHandler {
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut GpuiApp,
-    ) -> Option<UTF16Selection> {
-        let state = self.state.borrow();
-        let cursor_utf16 = state.utf16_offset_for_char(state.cursor_position);
-        Some(UTF16Selection {
-            range: cursor_utf16..cursor_utf16,
-            reversed: false,
-        })
-    }
-
-    fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut GpuiApp) -> Option<Range<usize>> {
-        self.state.borrow().marked_range.clone()
-    }
-
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        adjusted_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut GpuiApp,
-    ) -> Option<String> {
-        let state = self.state.borrow();
-        let start_char = state.char_pos_from_utf16(range_utf16.start);
-        let end_char = state.char_pos_from_utf16(range_utf16.end);
-        let start_byte = state.byte_offset_for_char(start_char);
-        let end_byte = state.byte_offset_for_char(end_char);
-
-        if end_byte <= state.text.len() {
-            *adjusted_range = Some(range_utf16);
-            Some(state.text[start_byte..end_byte].to_string())
-        } else {
-            None
-        }
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        replacement_range: Option<Range<usize>>,
-        text: &str,
-        _window: &mut Window,
-        _cx: &mut GpuiApp,
-    ) {
-        let mut state = self.state.borrow_mut();
-        let (start_char, end_char) = if let Some(range) = replacement_range {
-            (
-                state.char_pos_from_utf16(range.start),
-                state.char_pos_from_utf16(range.end),
-            )
-        } else {
-            (state.cursor_position, state.cursor_position)
-        };
-
-        let start_byte = state.byte_offset_for_char(start_char);
-        let end_byte = state.byte_offset_for_char(end_char);
-
-        state.text = format!(
-            "{}{}{}",
-            &state.text[..start_byte],
-            text,
-            &state.text[end_byte..]
-        );
-        state.cursor_position = start_char + text.chars().count();
-        state.marked_range = None;
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut GpuiApp,
-    ) {
-        let mut state = self.state.borrow_mut();
-        let (start_char, end_char) = if let Some(range) = &range_utf16 {
-            (
-                state.char_pos_from_utf16(range.start),
-                state.char_pos_from_utf16(range.end),
-            )
-        } else if let Some(marked) = &state.marked_range {
-            (
-                state.char_pos_from_utf16(marked.start),
-                state.char_pos_from_utf16(marked.end),
-            )
-        } else {
-            (state.cursor_position, state.cursor_position)
-        };
-
-        let start_byte = state.byte_offset_for_char(start_char);
-        let end_byte = state.byte_offset_for_char(end_char);
-
-        state.text = format!(
-            "{}{}{}",
-            &state.text[..start_byte],
-            new_text,
-            &state.text[end_byte..]
-        );
-
-        let new_end_utf16 = state.utf16_offset_for_char(start_char) + new_text.encode_utf16().count();
-        state.marked_range = Some(state.utf16_offset_for_char(start_char)..new_end_utf16);
-
-        if let Some(selected) = new_selected_range {
-            state.cursor_position = start_char + state.char_pos_from_utf16(selected.end);
-        } else {
-            state.cursor_position = start_char + new_text.chars().count();
-        }
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut GpuiApp) {
-        self.state.borrow_mut().marked_range = None;
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        _range_utf16: Range<usize>,
-        _window: &mut Window,
-        _cx: &mut GpuiApp,
-    ) -> Option<Bounds<Pixels>> {
-        None
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        _point: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut GpuiApp,
-    ) -> Option<usize> {
-        let state = self.state.borrow();
-        Some(state.utf16_offset_for_char(state.cursor_position))
-    }
-}
 
 /// Main application state
 pub struct App {
@@ -350,9 +169,8 @@ pub struct App {
     session_id: String,
     is_loading: bool,
     
-    // Shared input state for IME support
-    input_state: Rc<RefCell<InputState>>,
-    focus_handle: FocusHandle,
+    // Input component using gpui_component with full IME support
+    input_state: Entity<GpuiInputState>,
 
     // API client
     api_client: ApiClient,
@@ -363,6 +181,11 @@ pub struct App {
     agent_provider: String,
     agent_skills: Vec<String>,
     agent_tools: Vec<String>,
+
+    // User management
+    current_user_id: String,
+    available_users: Vec<String>,
+    show_user_dropdown: bool,
 
     // Collapsible panel states
     memory_expanded: bool,
@@ -383,9 +206,31 @@ pub struct App {
 }
 
 impl App {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let api_client = ApiClient::new(None);
         let session_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+
+        // Create input state with gpui_component's InputState for proper IME support
+        let input_state = cx.new(|cx| {
+            GpuiInputState::new(window, cx)
+                .placeholder("Type a message... (/ for commands)")
+        });
+
+        // Subscribe to input events for Enter key handling
+        cx.subscribe_in(&input_state, window, |this, input_state, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    // Get text and clear input
+                    let text = input_state.read(cx).value().to_string();
+                    input_state.update(cx, |state, cx| {
+                        state.set_value("", window, cx);
+                    });
+                    // Process message
+                    this.send_message_with_text(text, cx);
+                }
+                _ => {}
+            }
+        }).detach();
 
         Self {
             theme: MonokaiTheme::new(),
@@ -395,14 +240,16 @@ impl App {
             config: AppConfig::default(),
             session_id,
             is_loading: false,
-            input_state: Rc::new(RefCell::new(InputState::default())),
-            focus_handle: cx.focus_handle(),
+            input_state,
             api_client,
             connection_status: ConnectionStatus::Connecting,
             agent_model: String::new(),
             agent_provider: String::new(),
             agent_skills: vec![],
             agent_tools: vec![],
+            current_user_id: String::from("default"),
+            available_users: vec![],
+            show_user_dropdown: false,
             memory_expanded: false,
             knowledge_expanded: false,
             tool_expanded: true,
@@ -477,8 +324,58 @@ impl App {
         })
         .detach();
 
+        // Load users list
+        self.refresh_users(cx);
+
         // Load initial data
         self.refresh_sidebar_data(cx);
+    }
+
+    fn refresh_users(&mut self, cx: &mut Context<Self>) {
+        let api_client = self.api_client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move {
+                api_client.get_users()
+            }).await;
+            if let Ok(response) = result {
+                let _ = this.update(cx, |app, cx| {
+                    app.available_users = response.users;
+                    app.current_user_id = response.current;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn switch_user(&mut self, user_id: String, cx: &mut Context<Self>) {
+        let api_client = self.api_client.clone();
+        let user_id_clone = user_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move {
+                api_client.switch_user(&user_id_clone)
+            }).await;
+            if let Ok(response) = result {
+                if response.success {
+                    let _ = this.update(cx, |app, cx| {
+                        app.current_user_id = response.user_id;
+                        app.show_user_dropdown = false;
+                        // Generate new session_id for new user
+                        app.session_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                        // Clear messages
+                        app.messages.clear();
+                        app.messages.push(ChatMessage::system(format!(
+                            "Switched to user: {}\nNew session started.",
+                            app.current_user_id
+                        )));
+                        // Refresh data for new user
+                        app.refresh_sidebar_data(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     fn refresh_sidebar_data(&mut self, cx: &mut Context<Self>) {
@@ -517,84 +414,8 @@ impl App {
         }
     }
 
-    fn handle_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let mut state = self.input_state.borrow_mut();
-        
-        // Handle special keys first
-        match event.keystroke.key.as_str() {
-            "backspace" => {
-                if state.cursor_position > 0 {
-                    let byte_pos = state.byte_offset_for_char(state.cursor_position);
-                    let text_before = &state.text[..byte_pos];
-                    if let Some(c) = text_before.chars().last() {
-                        let new_byte_pos = text_before.len() - c.len_utf8();
-                        state.text = format!(
-                            "{}{}",
-                            &text_before[..new_byte_pos],
-                            &state.text[byte_pos..]
-                        );
-                        state.cursor_position -= 1;
-                    }
-                }
-                drop(state);
-                cx.notify();
-                return;
-            }
-            "enter" => {
-                drop(state);
-                self.send_message(cx);
-                return;
-            }
-            "space" => {
-                state.insert_text(" ");
-                drop(state);
-                cx.notify();
-                return;
-            }
-            "left" => {
-                if state.cursor_position > 0 {
-                    state.cursor_position -= 1;
-                }
-                drop(state);
-                cx.notify();
-                return;
-            }
-            "right" => {
-                if state.cursor_position < state.text.chars().count() {
-                    state.cursor_position += 1;
-                }
-                drop(state);
-                cx.notify();
-                return;
-            }
-            "escape" | "tab" | "up" | "down" => {
-                return;
-            }
-            _ => {}
-        }
-
-        // Regular character input via key_char (for direct keyboard input, not IME)
-        // IME input goes through InputHandler
-        if let Some(key_char) = &event.keystroke.key_char {
-            // Only handle single-char ASCII input here
-            if key_char.len() == 1 && key_char.is_ascii() {
-                state.insert_text(key_char);
-                drop(state);
-                cx.notify();
-            }
-        }
-    }
-
-    fn send_message(&mut self, cx: &mut Context<Self>) {
-        let text = {
-            let state = self.input_state.borrow();
-            state.text.trim().to_string()
-        };
+    fn send_message_with_text(&mut self, text: String, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
         
         if text.is_empty() || self.is_loading {
             return;
@@ -602,22 +423,12 @@ impl App {
 
         // Check for command
         if let Some(command) = Command::parse(&text) {
-            {
-                let mut state = self.input_state.borrow_mut();
-                state.text.clear();
-                state.cursor_position = 0;
-            }
             self.handle_command(command, cx);
             return;
         }
 
         // Add user message
         self.messages.push(ChatMessage::user(&text));
-        {
-            let mut state = self.input_state.borrow_mut();
-            state.text.clear();
-            state.cursor_position = 0;
-        }
         self.is_loading = true;
         self.current_tool_calls.clear();
         self.live_tool_calls.clear();  // Clear live tool calls for new message
@@ -791,10 +602,15 @@ impl App {
     fn handle_send_click(
         &mut self,
         _event: &ClickEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.send_message(cx);
+        // Get text and clear input
+        let text = self.input_state.read(cx).value().to_string();
+        self.input_state.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        self.send_message_with_text(text, cx);
     }
 
     fn handle_command(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -1001,7 +817,52 @@ impl App {
         cx.notify();
     }
 
-    fn render_header(&self) -> impl IntoElement {
+    fn toggle_tool_call(&mut self, tool_id: String, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tc) = self.live_tool_calls.iter_mut().find(|t| t.id == tool_id) {
+            tc.expanded = !tc.expanded;
+            cx.notify();
+        }
+    }
+
+    /// Filter out tool call patterns from LLM response to keep it clean
+    fn clean_response_content(content: &str) -> String {
+        let mut result = content.to_string();
+        
+        // Remove tool output blocks - entire sections starting with tool emoji
+        // Pattern: 🔧 **tool_name** followed by content until next section or end
+        let tool_block_patterns = [
+            // Full tool output block: 🔧 **name**\n_desc_\n```...```
+            r"(?s)🔧\s*\*\*\w+\*\*.*?```[\s\S]*?```",
+            // Tool header with description: 🔧 **name**\n_desc..._
+            r"🔧\s*\*\*\w+\*\*\s*\n_[^_]*\.\.\._",
+            // Just tool header: 🔧 **name**
+            r"🔧\s*\*\*\w+\*\*",
+            // Summarized marker: [Summarized from N chars]
+            r"\[Summarized from \d+ chars\]",
+            // Standalone descriptions: _text..._
+            r"_[^_\n]+\.\.\._",
+        ];
+        
+        for pattern in tool_block_patterns {
+            if let Ok(re) = Regex::new(pattern) {
+                result = re.replace_all(&result, "").to_string();
+            }
+        }
+        
+        // Remove code blocks that are just tool output markers
+        if let Ok(re) = Regex::new(r"```\s*\n?\s*```") {
+            result = re.replace_all(&result, "").to_string();
+        }
+        
+        // Remove multiple consecutive newlines
+        while result.contains("\n\n\n") {
+            result = result.replace("\n\n\n", "\n\n");
+        }
+        
+        result.trim().to_string()
+    }
+
+    fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
 
         let status_color = match &self.connection_status {
@@ -1060,10 +921,159 @@ impl App {
                     .flex()
                     .items_center()
                     .gap_4()
+                    .child(self.render_user_selector(cx))
                     .child(self.render_status_indicator(status_text, status_color))
                     .child(self.render_status_dot("Memory", self.config.show_memory))
                     .child(self.render_status_dot("Knowledge", self.config.show_knowledge)),
             )
+    }
+
+    fn render_user_selector(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = &self.theme;
+        let current_user = self.current_user_id.clone();
+        let show_dropdown = self.show_user_dropdown;
+        let users = self.available_users.clone();
+
+        div()
+            .id("user-selector")
+            .child(
+                // User button
+                div()
+                    .id("user-button")
+                    .px_3()
+                    .py_1()
+                    .rounded(px(6.))
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .hover(|s| s.bg(theme.background_elevated))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.show_user_dropdown = !this.show_user_dropdown;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground_muted)
+                            .child("👤"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(current_user)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.foreground_muted)
+                            .child(if show_dropdown { "▲" } else { "▼" }),
+                    ),
+            )
+            .when(show_dropdown, |this| {
+                // Use deferred + anchored to render dropdown on top layer
+                this.child(
+                    deferred(
+                        anchored().child(
+                            // Dropdown menu - rendered on top of everything
+                            div()
+                                .id("user-dropdown-menu")
+                                .occlude()
+                                .w(px(200.))
+                                .bg(theme.background_elevated)
+                                .border_1()
+                                .border_color(theme.border)
+                                .rounded(px(6.))
+                                .shadow_lg()
+                                .flex()
+                                .flex_col()
+                                // User items
+                                .children(
+                                    users.into_iter().map(|user| {
+                                        let user_clone = user.clone();
+                                        let is_current = user == self.current_user_id;
+                                        div()
+                                            .id(SharedString::from(format!("user-{}", user)))
+                                            .w_full()
+                                            .px_3()
+                                            .py_2()
+                                            .cursor_pointer()
+                                            .text_sm()
+                                            .text_color(if is_current { theme.accent_cyan } else { theme.foreground })
+                                            .bg(if is_current { theme.background_highlight } else { theme.background_elevated })
+                                            .hover(|s| s.bg(theme.background_highlight))
+                                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                this.switch_user(user_clone.clone(), cx);
+                                            }))
+                                            .child(SharedString::from(user))
+                                    })
+                                )
+                                // Divider
+                                .child(
+                                    div()
+                                        .h(px(1.))
+                                        .w_full()
+                                        .bg(theme.border)
+                                )
+                                // New user option
+                                .child(
+                                    div()
+                                        .id("new-user-option")
+                                        .w_full()
+                                        .px_3()
+                                        .py_2()
+                                        .cursor_pointer()
+                                        .text_sm()
+                                        .text_color(theme.accent_green)
+                                        .hover(|s| s.bg(theme.background_highlight))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.handle_create_new_user(cx);
+                                        }))
+                                        .child("+ New User..."),
+                                ),
+                        ),
+                    ),
+                )
+            })
+    }
+
+    fn handle_create_new_user(&mut self, cx: &mut Context<Self>) {
+        // For now, create a new user with a UUID-based name
+        // A proper implementation would show a dialog
+        let new_user_id = format!("user_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let api_client = self.api_client.clone();
+        let user_id = new_user_id.clone();
+        
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move {
+                api_client.create_user(&user_id)
+            }).await;
+            if let Ok(response) = result {
+                if response.success {
+                    let _ = this.update(cx, |app, cx| {
+                        app.current_user_id = response.user_id.clone();
+                        app.show_user_dropdown = false;
+                        if !app.available_users.contains(&response.user_id) {
+                            app.available_users.push(response.user_id.clone());
+                        }
+                        // Generate new session
+                        app.session_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                        app.messages.clear();
+                        app.messages.push(ChatMessage::system(format!(
+                            "Created and switched to new user: {}\nNew session started.",
+                            response.user_id
+                        )));
+                        app.refresh_sidebar_data(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     fn render_status_indicator(&self, label: &'static str, color: Hsla) -> impl IntoElement {
@@ -1111,95 +1121,104 @@ impl App {
     fn render_messages(&self) -> impl IntoElement {
         let theme = &self.theme;
 
+        // Pre-render all message elements with markdown support
+        let message_elements: Vec<_> = self.messages.iter().enumerate().map(|(idx, msg)| {
+            let (bg_color, align_end, role_label, role_color) = match msg.role {
+                MessageRole::User => (theme.user_message_bg, true, "You", theme.accent_green),
+                MessageRole::Assistant => {
+                    (theme.assistant_message_bg, false, "Assistant", theme.accent_cyan)
+                }
+                MessageRole::System => {
+                    (theme.system_message_bg, false, "System", theme.accent_yellow)
+                }
+            };
+
+            let has_tools = !msg.tool_calls.is_empty();
+            let cleaned_content = Self::clean_response_content(&msg.content);
+            
+            // Use TextView::markdown for rendering markdown content
+            let content_view = TextView::markdown(
+                SharedString::from(format!("msg-{}", idx)),
+                cleaned_content,
+            );
+
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .mb_3()
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .when(align_end, |el| el.justify_end())
+                        .when(!align_end, |el| el.justify_start())
+                        .child(
+                            div()
+                                .max_w(px(600.))
+                                .p_3()
+                                .rounded_lg()
+                                .bg(bg_color)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_between()
+                                        .mb_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(role_color)
+                                                .child(role_label),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.foreground_muted)
+                                                .child(msg.timestamp.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .child(content_view),
+                                )
+                                .when(has_tools, |el| {
+                                    el.child(
+                                        div()
+                                            .mt_2()
+                                            .pt_2()
+                                            .border_t_1()
+                                            .border_color(theme.border)
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.accent_orange)
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(format!(
+                                                        "🔧 {} tool(s) used",
+                                                        msg.tool_calls.len()
+                                                    )),
+                                            )
+                                            .children(msg.tool_calls.iter().map(|tc| {
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.foreground_dim)
+                                                    .child(format!("• {}", tc.name))
+                                            })),
+                                    )
+                                }),
+                        ),
+                )
+        }).collect();
+
         div()
             .id("messages-container")
             .flex_1()
             .overflow_y_scroll()
             .bg(theme.background)
             .p_4()
-            .children(self.messages.iter().map(|msg| {
-                let (bg_color, align_end, role_label, role_color) = match msg.role {
-                    MessageRole::User => (theme.user_message_bg, true, "You", theme.accent_green),
-                    MessageRole::Assistant => {
-                        (theme.assistant_message_bg, false, "Assistant", theme.accent_cyan)
-                    }
-                    MessageRole::System => {
-                        (theme.system_message_bg, false, "System", theme.accent_yellow)
-                    }
-                };
-
-                let has_tools = !msg.tool_calls.is_empty();
-
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .mb_3()
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .when(align_end, |el| el.justify_end())
-                            .when(!align_end, |el| el.justify_start())
-                            .child(
-                                div()
-                                    .max_w(px(600.))
-                                    .p_3()
-                                    .rounded_lg()
-                                    .bg(bg_color)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_between()
-                                            .mb_1()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(role_color)
-                                                    .child(role_label),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.foreground_muted)
-                                                    .child(msg.timestamp.clone()),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme.foreground)
-                                            .child(msg.content.clone()),
-                                    )
-                                    .when(has_tools, |el| {
-                                        el.child(
-                                            div()
-                                                .mt_2()
-                                                .pt_2()
-                                                .border_t_1()
-                                                .border_color(theme.border)
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme.accent_orange)
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .child(format!(
-                                                            "🔧 {} tool(s) used",
-                                                            msg.tool_calls.len()
-                                                        )),
-                                                )
-                                                .children(msg.tool_calls.iter().map(|tc| {
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme.foreground_dim)
-                                                        .child(format!("• {}", tc.name))
-                                                })),
-                                        )
-                                    }),
-                            ),
-                    )
-            }))
+            .children(message_elements)
             .when(self.is_loading, |el| {
                 el.child(
                     div()
@@ -1401,7 +1420,7 @@ impl App {
                 let content = div()
                     .id("live-tools-content")
                     .w_full()
-                    .max_h(px(300.))
+                    .max_h(px(400.))
                     .overflow_y_scroll()
                     .bg(theme.background_secondary)
                     .when(!has_tools, |inner| {
@@ -1428,12 +1447,16 @@ impl App {
                             ToolStatus::Failed => theme.accent_red,
                         };
                         
-                        let args_str = tc.arguments.to_string();
-                        let args_preview = if args_str.len() > 100 {
-                            format!("{}...", &args_str[..100])
-                        } else {
-                            args_str
-                        };
+                        // Get result content (show result by default, not arguments)
+                        let result_content = tc.result.clone().unwrap_or_else(|| {
+                            if tc.status == ToolStatus::Running {
+                                "Running...".to_string()
+                            } else {
+                                "No result".to_string()
+                            }
+                        });
+                        
+                        let tool_id = tc.id.clone();
 
                         div()
                             .w_full()
@@ -1442,9 +1465,15 @@ impl App {
                             })
                             .child(
                                 div()
+                                    .id(SharedString::from(format!("tool-{}", tc.id)))
                                     .w_full()
                                     .px_3()
                                     .py_2()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.background_highlight))
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.toggle_tool_call(tool_id.clone(), window, cx);
+                                    }))
                                     .child(
                                         div()
                                             .flex()
@@ -1453,6 +1482,7 @@ impl App {
                                             .child(
                                                 div()
                                                     .text_xs()
+                                                    .text_color(theme.foreground_muted)
                                                     .child(if tc.expanded { "▼" } else { "▶" }),
                                             )
                                             .child(div().text_xs().child(status_icon))
@@ -1465,50 +1495,36 @@ impl App {
                                             ),
                                     )
                                     .when(tc.expanded, |inner| {
+                                        // Use markdown rendering for tool results
+                                        let result_view = TextView::markdown(
+                                            SharedString::from(format!("tool-result-{}", tc.id)),
+                                            result_content.clone(),
+                                        );
+                                        let result_container_id = format!("tool-result-container-{}", tc.id);
+                                        
                                         inner.child(
                                             div()
+                                                .id(SharedString::from(result_container_id))
                                                 .mt_2()
                                                 .p_2()
                                                 .rounded(px(4.))
                                                 .bg(theme.background)
+                                                .max_h(px(300.))
+                                                .overflow_y_scroll()
+                                                // Show result with markdown rendering
                                                 .child(
                                                     div()
                                                         .text_xs()
                                                         .text_color(theme.foreground_muted)
                                                         .font_weight(FontWeight::MEDIUM)
-                                                        .child("Arguments:"),
+                                                        .mb_1()
+                                                        .child("Result:"),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(theme.foreground_dim)
-                                                        .child(args_preview.clone()),
-                                                )
-                                                .when(tc.result.is_some(), |inner2| {
-                                                    let result = tc.result.clone().unwrap_or_default();
-                                                    let result_preview = if result.len() > 200 {
-                                                        format!("{}...", &result[..200])
-                                                    } else {
-                                                        result
-                                                    };
-                                                    inner2.child(
-                                                        div()
-                                                            .mt_2()
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(theme.foreground_muted)
-                                                                    .font_weight(FontWeight::MEDIUM)
-                                                                    .child("Result:"),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(theme.accent_green)
-                                                                    .child(result_preview),
-                                                            ),
-                                                    )
-                                                }),
+                                                        .child(result_view),
+                                                ),
                                         )
                                     }),
                             )
@@ -1520,13 +1536,14 @@ impl App {
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
 
-        // Prepare memory items
+        // Prepare memory items (use chars().take() for safe UTF-8 truncation)
         let memory_items: Vec<(String, String)> = self
             .memory_items
             .iter()
             .map(|m| {
-                let content_preview = if m.content.len() > 50 {
-                    format!("{}...", &m.content[..50])
+                let content_preview = if m.content.chars().count() > 50 {
+                    let preview: String = m.content.chars().take(50).collect();
+                    format!("{}...", preview)
                 } else {
                     m.content.clone()
                 };
@@ -1611,43 +1628,10 @@ impl App {
             )
     }
 
-    fn render_input(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn render_input(&self, _window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let is_loading = self.is_loading;
-        let is_focused = self.focus_handle.is_focused(window);
         let is_connected = self.connection_status == ConnectionStatus::Connected;
-        
-        // Read input state
-        let (input_text, cursor_pos, has_marked) = {
-            let state = self.input_state.borrow();
-            (state.text.clone(), state.cursor_position, state.marked_range.is_some())
-        };
-
-        // Build display text with cursor
-        let display_text = if input_text.is_empty() {
-            if is_connected {
-                "Type a message... (/ for commands)".to_string()
-            } else {
-                "Connect to backend first (/reconnect)".to_string()
-            }
-        } else {
-            // Insert cursor character at position
-            let chars: Vec<char> = input_text.chars().collect();
-            let mut result = String::new();
-            for (i, c) in chars.iter().enumerate() {
-                if i == cursor_pos && is_focused {
-                    result.push('|');  // Cursor
-                }
-                result.push(*c);
-            }
-            if cursor_pos >= chars.len() && is_focused {
-                result.push('|');
-            }
-            if has_marked {
-                result.push_str(" (组合中)");  // Show IME indicator
-            }
-            result
-        };
 
         div()
             .w_full()
@@ -1661,30 +1645,12 @@ impl App {
                     .items_center()
                     .gap_2()
                     .child(
+                        // Use gpui_component Input with proper IME support
                         div()
-                            .id("input-field")
                             .flex_1()
-                            .px_4()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(theme.background)
-                            .border_1()
-                            .border_color(if is_focused {
-                                theme.border_focus
-                            } else {
-                                theme.border
-                            })
-                            .track_focus(&self.focus_handle)
-                            .on_key_down(cx.listener(Self::handle_key_down))
                             .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(if input_text.is_empty() {
-                                        theme.foreground_muted
-                                    } else {
-                                        theme.foreground
-                                    })
-                                    .child(display_text),
+                                Input::new(&self.input_state)
+                                    .appearance(false) // Remove default styling
                             ),
                     )
                     .child(
@@ -1723,24 +1689,17 @@ impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
 
-        // Register InputHandler for IME support
-        let input_handler = AppInputHandler {
-            state: self.input_state.clone(),
-        };
-        window.handle_input(&self.focus_handle, input_handler, cx);
-
         div()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
             .flex()
-            .track_focus(&self.focus_handle)
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .child(self.render_header())
+                    .child(self.render_header(cx))
                     .child(self.render_messages())
                     .child(self.render_input(window, cx)),
             )
@@ -1749,12 +1708,15 @@ impl Render for App {
 }
 
 fn main() {
-    Application::new().run(|app| {
+    Application::new().run(|cx| {
+        // Initialize gpui-component (required before using any component)
+        gpui_component::init(cx);
+
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(px(1200.), px(800.)),
-                app,
+                cx,
             ))),
             titlebar: Some(TitlebarOptions {
                 title: Some(SharedString::from("OmniEmployee")),
@@ -1763,18 +1725,24 @@ fn main() {
             ..Default::default()
         };
 
-        app.open_window(window_options, |window, cx| {
-            let focus_handle = cx.focus_handle();
-            focus_handle.focus(window, cx);
+        cx.open_window(window_options, |window, cx| {
+            // Create app with window reference for input component initialization
+            let app_entity = cx.new(|cx| App::new(window, cx));
 
-            let app_entity = cx.new(App::new);
-
-            // Initialize the app after creation
+            // Initialize the app after creation (connect to backend)
             app_entity.update(cx, |app, cx| {
                 app.initialize(cx);
             });
 
-            app_entity
+            // Focus the input after initialization
+            app_entity.update(cx, |app, cx| {
+                app.input_state.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                });
+            });
+
+            // Wrap in Root for gpui-component theming support
+            cx.new(|cx| Root::new(app_entity.clone(), window, cx))
         })
         .unwrap();
     });

@@ -367,22 +367,10 @@ class AgentLoop:
                         tool_calls=tool_calls
                     )
 
-                    # Execute tools and yield status
+                    # Execute tools silently (tool info sent via SSE events, not in text stream)
                     for tc in tool_calls_buffer:
                         tool_name = tc["name"]
                         tool_args = tc["arguments"]
-
-                        # Show tool name and arguments
-                        yield f"\n\n🔧 **{tool_name}**\n"
-
-                        # For run_command, show the command being executed
-                        if tool_name == "run_command" and "command" in tool_args:
-                            command = tool_args["command"]
-                            working_dir = tool_args.get("working_dir")
-                            cmd_display = f"$ {command}"
-                            if working_dir:
-                                cmd_display += f" (in {working_dir})"
-                            yield f"```\n{cmd_display}\n```\n"
 
                         result = await self._execute_single_tool(tool_name, tool_args)
 
@@ -392,7 +380,6 @@ class AgentLoop:
                         # Summarize web search/extract results
                         if tool_name in ("web_search", "web_extract") and result.success and self.config.summarize_web_results:
                             search_intent = tool_args.get("query", "") or tool_args.get("url", "")
-                            yield f"_Summarizing results for: {search_intent[:100]}..._\n"
                             result_content = await self._summarize_web_result(result_content, search_intent)
 
                         self.agent.context.add_tool_result(
@@ -400,19 +387,6 @@ class AgentLoop:
                             content=result_content,
                             is_error=not result.success
                         )
-
-                        # Yield result preview
-                        result_preview = result_content
-
-                        # For run_command, the output already includes the command at the top
-                        max_preview = 500 if tool_name != "run_command" else 800
-                        if tool_name in ("web_search", "web_extract"):
-                            max_preview = 1500  # Show more for summarized web results
-
-                        if len(result_preview) > max_preview:
-                            result_preview = result_preview[:max_preview] + "..."
-
-                        yield f"```\n{result_preview}\n```\n"
 
                     self.state = LoopState.THINKING
                     yield "\n"

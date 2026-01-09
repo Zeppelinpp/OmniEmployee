@@ -117,6 +117,20 @@ pub struct KnowledgeStats {
     pub status: Option<String>,
 }
 
+/// Users list response
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UsersResponse {
+    pub users: Vec<String>,
+    pub current: String,
+}
+
+/// User switch response
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserSwitchResponse {
+    pub success: bool,
+    pub user_id: String,
+}
+
 /// Stream event types from SSE
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -232,6 +246,27 @@ impl ApiClient {
     pub fn get_knowledge_stats(&self) -> Result<KnowledgeStats> {
         let url = format!("{}/api/knowledge/stats", self.base_url);
         let response = self.client().get(&url).send()?.json()?;
+        Ok(response)
+    }
+
+    /// Get list of users (blocking)
+    pub fn get_users(&self) -> Result<UsersResponse> {
+        let url = format!("{}/api/users", self.base_url);
+        let response = self.client().get(&url).send()?.json()?;
+        Ok(response)
+    }
+
+    /// Switch to a different user (blocking)
+    pub fn switch_user(&self, user_id: &str) -> Result<UserSwitchResponse> {
+        let url = format!("{}/api/user/switch?user_id={}", self.base_url, urlencoding::encode(user_id));
+        let response = self.client().post(&url).send()?.json()?;
+        Ok(response)
+    }
+
+    /// Create a new user (blocking)
+    pub fn create_user(&self, user_id: &str) -> Result<UserSwitchResponse> {
+        let url = format!("{}/api/user/create?user_id={}", self.base_url, urlencoding::encode(user_id));
+        let response = self.client().post(&url).send()?.json()?;
         Ok(response)
     }
 

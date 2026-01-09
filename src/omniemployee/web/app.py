@@ -63,6 +63,13 @@ _loop: AgentLoop | None = None
 _memory_plugin: BIEMContextPlugin | None = None
 _knowledge_plugin: KnowledgeLearningPlugin | None = None
 _sessions: dict[str, dict] = {}
+_current_user_id: str = ""  # Dynamic user_id for switching
+
+
+def get_current_user_id() -> str:
+    """Get the current user_id (dynamic or from env)."""
+    global _current_user_id
+    return _current_user_id or os.getenv("USER_ID", "default")
 
 
 def create_memory_config() -> MemoryConfig:
@@ -146,9 +153,9 @@ async def lifespan(app: FastAPI):
             config = create_memory_config()
             _memory_plugin = BIEMContextPlugin(config)
             await _memory_plugin.initialize()
-            # Access _memory only if it exists
-            if hasattr(_memory_plugin, '_memory') and _memory_plugin._memory is not None:
-                _memory = _memory_plugin._memory
+            # Access memory manager through the plugin (attribute is 'memory', not '_memory')
+            if hasattr(_memory_plugin, 'memory') and _memory_plugin.memory is not None:
+                _memory = _memory_plugin.memory
                 print("✓ Memory system connected")
             else:
                 print("⚠ Memory plugin initialized but memory manager not available")
@@ -366,12 +373,13 @@ async def chat_stream(message: str, session_id: str = ""):
                 
                 # Check for tool results in context
                 for msg in _agent.context.messages:
-                    if hasattr(msg, 'role') and msg.role == 'tool':
-                        tool_id = getattr(msg, 'tool_call_id', None)
+                    # Tool results are in msg.tool_result, role is MessageRole enum
+                    if hasattr(msg, 'tool_result') and msg.tool_result is not None:
+                        tool_id = msg.tool_result.tool_call_id
                         result_key = f"result_{tool_id}"
                         if result_key not in seen_tool_call_ids:
                             seen_tool_call_ids.add(result_key)
-                            content = getattr(msg, 'content', '')
+                            content = msg.tool_result.content
                             # Truncate long results
                             if len(content) > 500:
                                 content = content[:500] + "..."
@@ -493,11 +501,15 @@ async def get_stats():
 @app.get("/api/memory/context")
 async def get_memory_context(query: str = "", limit: int = 10):
     """Get relevant memory items for a query."""
-    if not _memory_plugin:
+    if not _memory:
         return {"items": [], "message": "Memory not available"}
     
     try:
-        nodes = await _memory_plugin._memory.retrieve(query, limit=limit)
+        # Use recall() for query-based search, or get_working_memory() for empty query
+        if query:
+            nodes = await _memory.recall(query, top_k=limit)
+        else:
+            nodes = await _memory.get_working_memory(limit=limit)
         return {
             "items": [
                 {
@@ -654,7 +666,7 @@ async def get_l3_facts():
 
 @app.get("/api/l3/links")
 async def get_l3_links():
-    """Get L3 persistent links."""
+    """Get L3 persistent links with content snippets."""
     if not _memory:
         return {"links": [], "message": "Memory not initialized"}
     
@@ -664,18 +676,35 @@ async def get_l3_links():
     
     try:
         links = await _memory._l3.get_all_links(limit=100)
-        return {
-            "links": [
-                {
-                    "source_id": l.source_id,
-                    "target_id": l.target_id,
-                    "type": l.link_type.value,
-                    "weight": round(l.weight, 3),
-                    "created_at": l.created_at,
-                }
-                for l in links
-            ]
-        }
+        
+        # Fetch content snippets for source and target nodes
+        result_links = []
+        for l in links:
+            source_content = "[unknown]"
+            target_content = "[unknown]"
+            
+            # Try to get content from L2 vector storage
+            source_node = await _memory._l2_vector.get(l.source_id)
+            if source_node:
+                content = source_node.content
+                source_content = content[:50] + "..." if len(content) > 50 else content
+            
+            target_node = await _memory._l2_vector.get(l.target_id)
+            if target_node:
+                content = target_node.content
+                target_content = content[:50] + "..." if len(content) > 50 else content
+            
+            result_links.append({
+                "source_id": l.source_id,
+                "target_id": l.target_id,
+                "source_content": source_content,
+                "target_content": target_content,
+                "type": l.link_type.value,
+                "weight": round(l.weight, 3),
+                "created_at": l.created_at,
+            })
+        
+        return {"links": result_links}
     except Exception as e:
         return {"links": [], "error": str(e)}
 
@@ -690,6 +719,73 @@ async def delete_node(node_id: str):
     return {"success": success, "node_id": node_id}
 
 
+# ==================== Config API ====================
+
+@app.get("/api/config")
+async def get_config():
+    """Get current configuration including user_id."""
+    return {
+        "user_id": get_current_user_id(),
+        "memory_enabled": _memory is not None,
+        "knowledge_enabled": _knowledge_store is not None,
+    }
+
+
+@app.get("/api/users")
+async def get_users():
+    """Get list of all users with knowledge data."""
+    if not _knowledge_store:
+        return {"users": [get_current_user_id()], "current": get_current_user_id()}
+    
+    try:
+        # Query distinct user_ids from knowledge store
+        async with _knowledge_store._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT user_id FROM knowledge_triples ORDER BY user_id"
+            )
+        users = [row["user_id"] for row in rows if row["user_id"]]
+        
+        # Ensure current user is in list
+        current = get_current_user_id()
+        if current not in users:
+            users.insert(0, current)
+            
+        return {"users": users, "current": current}
+    except Exception as e:
+        return {"users": [get_current_user_id()], "current": get_current_user_id(), "error": str(e)}
+
+
+@app.post("/api/user/switch")
+async def switch_user(user_id: str):
+    """Switch to a different user_id for testing."""
+    global _current_user_id, _knowledge_plugin
+    
+    _current_user_id = user_id
+    
+    # Update knowledge plugin config if available
+    if _knowledge_plugin:
+        _knowledge_plugin.config.user_id = user_id
+    
+    return {"success": True, "user_id": user_id}
+
+
+@app.post("/api/user/create")
+async def create_user(user_id: str):
+    """Create a new user (just sets it as current, data will be created on first message)."""
+    global _current_user_id, _knowledge_plugin
+    
+    if not user_id or not user_id.strip():
+        return {"success": False, "error": "Invalid user_id"}
+    
+    _current_user_id = user_id.strip()
+    
+    # Update knowledge plugin config
+    if _knowledge_plugin:
+        _knowledge_plugin.config.user_id = _current_user_id
+    
+    return {"success": True, "user_id": _current_user_id}
+
+
 # ==================== Knowledge APIs ====================
 
 @app.get("/api/knowledge/stats")
@@ -699,7 +795,7 @@ async def get_knowledge_stats():
         return {"status": "unavailable"}
     
     try:
-        stats = await _knowledge_store.get_stats()
+        stats = await _knowledge_store.get_stats(get_current_user_id())
         return stats
     except Exception as e:
         return {"error": str(e)}
@@ -707,12 +803,15 @@ async def get_knowledge_stats():
 
 @app.get("/api/knowledge/triples")
 async def get_knowledge_triples(user_id: str = "", limit: int = 100):
-    """Get all knowledge triples."""
+    """Get all knowledge triples for the specified or default user."""
     if not _knowledge_store:
         return {"triples": [], "message": "Knowledge store not available"}
     
+    # Use specified user_id or current user
+    effective_user_id = user_id or get_current_user_id()
+    
     try:
-        triples = await _knowledge_store.get_all(user_id, limit)
+        triples = await _knowledge_store.get_all(effective_user_id, limit)
         return {
             "triples": [
                 {
@@ -737,12 +836,15 @@ async def get_knowledge_triples(user_id: str = "", limit: int = 100):
 
 @app.get("/api/knowledge/search")
 async def search_knowledge(q: str, user_id: str = "", limit: int = 20):
-    """Search knowledge triples."""
+    """Search knowledge triples for the specified or default user."""
     if not _knowledge_store:
         return {"triples": [], "message": "Knowledge store not available"}
     
+    # Use specified user_id or current user
+    effective_user_id = user_id or get_current_user_id()
+    
     try:
-        triples = await _knowledge_store.search(q, user_id, limit)
+        triples = await _knowledge_store.search(q, effective_user_id, limit)
         return {
             "triples": [
                 {
