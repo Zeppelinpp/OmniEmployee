@@ -6,6 +6,7 @@ triggering confirmation or restructuring actions.
 
 from __future__ import annotations
 
+import warnings
 from typing import Callable, Awaitable, Any
 from dataclasses import dataclass
 
@@ -16,12 +17,39 @@ from src.omniemployee.memory.models import (
 )
 
 
+# Prompt template for LLM conflict verification
+CONFLICT_VERIFY_PROMPT = """Analyze whether these two memory statements contain conflicting information.
+
+Statement A (existing):
+{content_a}
+
+Statement B (new):
+{content_b}
+
+Determine if they:
+1. Contradict each other (opposing facts)
+2. One updates/supersedes the other
+3. One refines/adds detail to the other
+4. No conflict (compatible information)
+
+Respond in JSON format:
+{{
+    "is_conflict": true/false,
+    "conflict_type": "contradiction" | "update" | "refinement" | "none",
+    "description": "Brief explanation of the conflict or compatibility",
+    "confidence": 0.0-1.0
+}}"""
+
+
 @dataclass
 class ConflictConfig:
     """Configuration for conflict detection."""
     similarity_threshold: float = 0.8   # Min similarity to check for conflict
-    polarity_threshold: float = 0.5     # Min polarity difference for conflict
     confidence_threshold: float = 0.7   # Min confidence to report conflict
+    
+    # Heuristic fallback (deprecated)
+    use_heuristic_fallback: bool = True  # Fall back to heuristic when LLM unavailable
+    polarity_threshold: float = 0.5      # (Deprecated) Min polarity difference for conflict
     
     # Actions
     auto_resolve_low_energy: bool = True  # Auto-resolve if old node has low energy
@@ -100,14 +128,12 @@ class ConflictChecker:
         existing_node: MemoryNode,
         similarity: float
     ) -> ConflictNode | None:
-        """Detect if two nodes are in conflict."""
-        # Quick heuristic check first
-        heuristic_conflict = self._heuristic_conflict_check(new_node, existing_node)
+        """Detect if two nodes are in conflict using LLM verification.
         
-        if not heuristic_conflict:
-            return None
-        
-        # If LLM callback available, verify with LLM
+        Primary: LLM-based conflict detection
+        Fallback: Heuristic check (deprecated, only when LLM unavailable)
+        """
+        # Primary: LLM-based conflict verification
         if self._verify_conflict_callback:
             try:
                 result = await self._verify_conflict_callback(
@@ -129,15 +155,30 @@ class ConflictChecker:
                     description=result.get("description", "")
                 )
             except Exception:
-                pass  # Fall back to heuristic result
+                # LLM call failed, try heuristic fallback
+                if not self.config.use_heuristic_fallback:
+                    return None
         
-        # Return heuristic-based conflict
+        # Fallback: Deprecated heuristic check (only when LLM unavailable)
+        if not self.config.use_heuristic_fallback:
+            return None
+        
+        warnings.warn(
+            "Using deprecated heuristic conflict check. "
+            "Set verify_conflict_callback for LLM-based detection.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
+        if not self._heuristic_conflict_check(new_node, existing_node):
+            return None
+        
         return ConflictNode(
             node_a_id=existing_node.id,
             node_b_id=new_node.id,
             similarity=similarity,
             conflict_type="potential_contradiction",
-            description=f"Heuristic: sentiment polarity differs significantly"
+            description="[Deprecated] Heuristic: sentiment polarity differs significantly"
         )
     
     def _heuristic_conflict_check(
@@ -265,3 +306,76 @@ class ConflictChecker:
             )
         
         return "\n".join(lines)
+
+
+def create_llm_conflict_callback(
+    llm_complete: Callable[[list[dict]], Awaitable[Any]],
+) -> Callable[[str, str], Awaitable[dict]]:
+    """Create an LLM-based conflict verification callback.
+    
+    Args:
+        llm_complete: Async function that takes messages and returns LLM response.
+                      Should have signature: async (messages: list[dict]) -> response
+                      Where response has .content attribute with the text.
+    
+    Returns:
+        Callback function for ConflictChecker.set_verify_conflict_callback()
+    
+    Example:
+        from src.omniemployee.llm.provider import LLMProvider, LLMConfig
+        
+        llm = LLMProvider(LLMConfig(model="gpt-4o-mini"))
+        callback = create_llm_conflict_callback(
+            lambda msgs: llm.complete(msgs)
+        )
+        conflict_checker.set_verify_conflict_callback(callback)
+    """
+    import json
+    
+    async def verify_conflict(content_a: str, content_b: str) -> dict:
+        """Verify conflict between two memory contents using LLM."""
+        prompt = CONFLICT_VERIFY_PROMPT.format(
+            content_a=content_a,
+            content_b=content_b
+        )
+        
+        messages = [{"role": "user", "content": prompt}]
+        
+        response = await llm_complete(messages)
+        
+        # Extract content from response
+        if hasattr(response, "content"):
+            text = response.content
+        elif isinstance(response, dict):
+            text = response.get("content", str(response))
+        else:
+            text = str(response)
+        
+        # Parse JSON response
+        try:
+            # Handle markdown code blocks
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(text)
+            
+            return {
+                "is_conflict": bool(result.get("is_conflict", False)),
+                "conflict_type": str(result.get("conflict_type", "none")),
+                "description": str(result.get("description", "")),
+                "confidence": float(result.get("confidence", 0.5))
+            }
+        except (json.JSONDecodeError, ValueError, KeyError):
+            # Fallback: try to infer from text
+            text_lower = text.lower()
+            is_conflict = "conflict" in text_lower and "no conflict" not in text_lower
+            return {
+                "is_conflict": is_conflict,
+                "conflict_type": "contradiction" if is_conflict else "none",
+                "description": text[:200] if text else "Unable to parse LLM response",
+                "confidence": 0.5
+            }
+    
+    return verify_conflict
