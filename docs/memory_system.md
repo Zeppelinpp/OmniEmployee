@@ -314,6 +314,72 @@ $$E(t) = E_0 \cdot e^{-\lambda \Delta t}$$
 
 ## 运行时 I/O 交互
 
+### 完整数据流概览
+
+```mermaid
+graph TB
+subgraph "用户输入"
+  INPUT[用户消息]
+end
+
+subgraph "Context 准备阶段"
+  INPUT --> RECALL[recall: 召回相关记忆]
+  INPUT --> KQUERY[知识检索]
+  RECALL --> L2V_R[(L2 Vector)]
+  RECALL --> L2G_R[(L2 Graph)]
+  KQUERY --> KPG[(Knowledge DB)]
+  L2V_R --> MERGE[融合排序]
+  L2G_R --> MERGE
+  MERGE --> CONTEXT[注入 Context]
+  KPG --> CONTEXT
+end
+
+subgraph "LLM 调用"
+  CONTEXT --> LLM[LLM 生成响应]
+  LLM --> RESPONSE[Agent 响应]
+end
+
+subgraph "记忆写入阶段"
+  INPUT --> INGEST_U[ingest: 记录用户消息]
+  RESPONSE --> INGEST_A[ingest: 记录 Agent 响应]
+  INGEST_U --> ENCODE[Encoder: 向量化]
+  INGEST_A --> ENCODE
+  ENCODE --> ENERGY[EnergyController: 评估能量]
+  ENERGY --> CONFLICT[ConflictChecker: LLM 冲突检测]
+  CONFLICT --> STORE[TierManager: 存储]
+end
+
+subgraph "存储层"
+  STORE -->|energy >= 0.5| L1[(L1 Working)]
+  STORE -->|始终| L2V[(L2 Vector)]
+  STORE -->|始终| L2G[(L2 Graph)]
+  L2G -->|持久化链接| L3[(L3 Crystal)]
+end
+
+subgraph "后台任务"
+  CONSOLIDATE[Consolidation 定时任务]
+  L2V -->|扫描相似节点| CONSOLIDATE
+  CONSOLIDATE -->|LLM 精炼| L3_FACT[(L3 Facts)]
+end
+
+style L1 fill:#ff6b6b,color:#fff
+style L2V fill:#4ecdc4,color:#fff
+style L2G fill:#45b7d1,color:#fff
+style L3 fill:#96ceb4,color:#fff
+style L3_FACT fill:#96ceb4,color:#fff
+```
+
+### 各层级数据产生时机
+
+| 层级 | 产生时机 | 触发条件 | 数据内容 |
+|------|----------|----------|----------|
+| **L1** | `ingest()` 时 | `energy >= 0.5` | 高能量节点的热缓存 |
+| **L2 Vector** | `ingest()` 时 | **始终** | 所有节点的向量嵌入 |
+| **L2 Graph** | `ingest()` 时 | **始终** | 节点 ID + 关联边 |
+| **L3 Links** | `route_new_node()` 时 | temporal/semantic 边创建时 | 持久化的边关系 |
+| **L3 Facts** | 后台 Consolidation | 相似节点 ≥ 3 个，相似度 ≥ 0.75 | LLM 精炼后的结晶事实 |
+| **Knowledge** | `process_message()` 时 | LLM 判定为事实性内容 | 全局三元组知识 |
+
 ### 写入流程（Ingest）
 
 ```mermaid
@@ -323,26 +389,35 @@ sequenceDiagram
   participant MM as MemoryManager
   participant Enc as Encoder
   participant Energy as EnergyController
+  participant Conflict as ConflictChecker
   participant Tier as TierManager
+  participant Router as AssociationRouter
   participant L1 as L1 Working
   participant L2V as L2 Vector
   participant L2G as L2 Graph
   participant L3 as L3 Crystal
+
   User->>Plugin: record_user_message(content)
   Plugin->>MM: ingest(content, source="user")
+
   Note over MM,Enc: 1. 编码阶段
   MM->>Enc: encode(content)
   Enc->>Enc: extract_entities()
   Enc->>Enc: analyze_sentiment()
-  Enc->>Enc: generate_embedding()
-  Enc-->>MM: MemoryNode
+  Enc->>Enc: generate_embedding() [Ollama BGE-M3]
+  Enc-->>MM: MemoryNode (含 vector)
+
   Note over MM,Energy: 2. 能量评估
   MM->>Energy: estimate_initial_energy(content)
-  Energy-->>MM: energy = 0.7
-  Note over MM,L2V: 3. 冲突检测
+  Energy-->>MM: energy (0.0~1.0)
+
+  Note over MM,Conflict: 3. 冲突检测 (LLM)
   MM->>L2V: search_by_vector(top_k=10)
   L2V-->>MM: similar_nodes
-  MM->>MM: check_conflicts()
+  MM->>Conflict: check_conflicts(new_node, similar_nodes)
+  Conflict->>Conflict: LLM verify_conflict_callback()
+  Conflict-->>MM: DissonanceSignals[]
+
   Note over MM,L3: 4. 存储阶段
   MM->>Tier: store(node)
   alt energy >= 0.5
@@ -350,54 +425,113 @@ sequenceDiagram
     Note right of L1: tier = "L1"
   end
   Tier->>L2V: put(node)
-  Note right of L2V: 始终写入向量库
+  Note right of L2V: 始终写入
   Tier->>L2G: add_node(node_id)
+  Note right of L2G: 始终添加
+
   Note over MM,L3: 5. 建立链接
-  MM->>L2G: route_new_node()
-  L2G->>L2G: create temporal links
-  L2G->>L2G: create semantic links
-  L2G->>L3: store_link() [持久化]
+  MM->>Router: route_new_node(node, similar_nodes)
+  Router->>Router: create_temporal_links()
+  Router->>Router: create_semantic_links()
+  Router->>L2G: add_link(link)
+  Router->>L3: store_link(link, user_id)
+  Note right of L3: 持久化边
 ```
 
-### 触发条件总结
-
-| 操作 | 触发条件 | 目标存储 |
-|------|----------|----------|
-| 写入 L1 | `energy >= 0.5` | Python Dict |
-| 写入 L2 Vector | **始终** | Milvus |
-| 添加图节点 | **始终** | NetworkX |
-| 建立 Temporal Link | 与最近 5 个节点时间差 < 5分钟 | NetworkX → PostgreSQL |
-| 建立 Semantic Link | 向量相似度 > 0.7 | NetworkX → PostgreSQL |
-| 写入 L3 Fact | 集群整合（≥5 节点） | PostgreSQL |
-
-### 读取流程（Recall）
+### 读取流程（Recall）与 Context 注入
 
 ```mermaid
 sequenceDiagram
-  participant Query as 查询
+  participant User as 用户输入
+  participant Main as main.py
+  participant Memory as BIEMContextPlugin
+  participant Knowledge as KnowledgeLearningPlugin
   participant MM as MemoryManager
   participant Enc as Encoder
   participant L2V as L2 Vector
   participant L2G as L2 Graph
-  participant Tier as TierManager
-  Query->>MM: recall(query, top_k=5)
-  Note over MM,Enc: 1. 编码查询
+  participant KStore as KnowledgeStore
+  participant Context as ContextManager
+  participant LLM as LLM
+
+  User->>Main: user_input
+
+  Note over Main,L2G: 1. 记忆召回
+  Main->>Memory: prepare_context(user_input)
+  Memory->>MM: recall(query, top_k=5)
   MM->>Enc: generate_embedding(query)
   Enc-->>MM: query_vector
-  Note over MM,L2V: 2. 向量检索（Stage 1）
   MM->>L2V: search_by_vector(query_vector, top_k=10)
-  L2V-->>MM: [(node, score), ...]
-  Note over MM,L2G: 3. 传播激活（Stage 2）
+  L2V-->>MM: [(node, vec_score), ...]
   MM->>L2G: spread_activation(seed_ids, hops=2)
-  L2G->>L2G: BFS with decay
   L2G-->>MM: {node_id: activation_score}
-  Note over MM,Tier: 4. 融合排序
-  MM->>MM: combined = 0.7*vec_score + 0.3*activation
-  MM->>Tier: get(node_id) for top results
-  Note over Tier,Tier: 5. 能量提升
-  Tier->>Tier: boost_energy(node)
-  MM-->>Query: [MemoryNode, ...]
+  MM->>MM: combined = 0.7×vec + 0.3×activation
+  MM-->>Memory: [MemoryNode, ...]
+  Memory-->>Main: "## Relevant Memories\n..."
+
+  Note over Main,KStore: 2. 知识召回
+  Main->>Knowledge: get_context_for_query(user_input)
+  Knowledge->>KStore: search_with_cluster_expansion()
+  KStore-->>Knowledge: [KnowledgeTriple, ...]
+  Knowledge-->>Main: "## Learned Knowledge\n..."
+
+  Note over Main,LLM: 3. Context 注入
+  Main->>Context: set_memory_context(memories + knowledge)
+  Main->>Context: build_messages()
+  Context-->>Main: messages[]
+  Main->>LLM: chat(messages)
+  LLM-->>Main: response
+
+  Note over Main,Memory: 4. 记录本轮对话
+  Main->>Memory: record_user_message(user_input)
+  Main->>Memory: record_assistant_message(response)
 ```
+
+### L3 Consolidation（结晶化）流程
+
+```mermaid
+sequenceDiagram
+  participant Timer as 定时器 (360s)
+  participant Tier as TierManager
+  participant L2V as L2 Vector
+  participant LLM as LLM
+  participant L3 as L3 Crystal
+
+  Timer->>Tier: _run_consolidation()
+
+  Note over Tier,L2V: 1. 获取候选节点
+  Tier->>L2V: list_recent(limit=100)
+  L2V-->>Tier: candidate_nodes[]
+
+  Note over Tier,Tier: 2. 相似度聚类
+  Tier->>Tier: _find_similar_clusters()
+  Note right of Tier: 贪婪聚类<br/>similarity >= 0.75
+  Tier-->>Tier: clusters[]
+
+  loop 每个 cluster (size >= 3)
+    Note over Tier,LLM: 3. LLM 精炼
+    Tier->>LLM: consolidate_memories(contents[])
+    Note right of LLM: 使用 memory_consolidation.md prompt
+    LLM-->>Tier: consolidated_fact
+
+    Note over Tier,L3: 4. 存储结晶
+    Tier->>L3: store_fact(CrystalFact)
+    Note right of L3: 含 user_id, source_node_ids
+  end
+```
+
+### 触发条件总结
+
+| 操作 | 触发条件 | 目标存储 | LLM 参与 |
+|------|----------|----------|----------|
+| 写入 L1 | `energy >= 0.5` | Python Dict | ❌ |
+| 写入 L2 Vector | **始终** | Milvus | ❌ |
+| 添加图节点 | **始终** | NetworkX | ❌ |
+| 建立 Temporal Link | 与最近 5 个节点时间差 < 5分钟 | NetworkX → PostgreSQL | ❌ |
+| 建立 Semantic Link | 向量相似度 > 0.7 | NetworkX → PostgreSQL | ❌ |
+| 冲突检测 | 新节点与已有节点相似度 > 0.8 | - | ✅ LLM 验证 |
+| 写入 L3 Fact | 后台任务，相似节点 ≥ 3 个 | PostgreSQL | ✅ LLM 精炼 |
+| 知识抽取 | 每条消息 | PostgreSQL + Milvus | ✅ LLM 抽取 |
 
 ### 层级流动
 
@@ -408,14 +542,28 @@ subgraph "Promotion（升级）"
 end
 subgraph "Demotion（降级）"
   L1_D[L1 节点] -->|energy < 0.3<br/>长时间未访问| L2_D[L2]
-  L2_D -->|整合条件满足| L3_D[L3 Crystal]
+end
+subgraph "Crystallization（结晶化）"
+  L2_C[L2 相似节点簇] -->|后台任务<br/>LLM 精炼| L3_C[L3 Fact]
 end
 style L1_P fill:#ff6b6b
 style L2_P fill:#4ecdc4
 style L1_D fill:#ff6b6b
 style L2_D fill:#4ecdc4
-style L3_D fill:#96ceb4
+style L3_C fill:#96ceb4
 ```
+
+### Prompt 文件
+
+系统使用的 LLM prompt 统一存放在 `src/prompts/` 目录：
+
+| 文件 | 用途 | 调用时机 |
+|------|------|----------|
+| `memory_consolidation.md` | 多记忆结晶精炼 | Consolidation 后台任务 |
+| `memory_conflict_verify.md` | 记忆冲突检测 | ingest 时检测冲突 |
+| `system_prompt.md` | Agent 系统提示词 | LLM 调用 |
+| `conversation_summary.md` | 对话摘要 | Context 压缩 |
+| `web_search_summary.md` | 网页搜索摘要 | 工具结果处理 |
 
 ---
 
@@ -428,6 +576,37 @@ style L3_D fill:#96ceb4
 1. **解耦设计**：记忆系统作为可选插件，不修改核心 prompt 模板
 2. **位置固定**：通过 `ContextManager.build_messages()` 保证 sections 顺序一致
 3. **按需注入**：只有召回到相关记忆时才注入，避免空白占位
+4. **LLM Callback**：在初始化时配置 LLM callback，用于冲突检测和结晶精炼
+
+### 系统初始化流程
+
+```mermaid
+sequenceDiagram
+  participant App as FastAPI Lifespan
+  participant Agent as Agent
+  participant Loop as AgentLoop
+  participant LLM as LLMProvider
+  participant Memory as MemoryManager
+  participant Knowledge as KnowledgeLearningPlugin
+
+  Note over App,Knowledge: 1. 初始化 Agent 和 Loop
+  App->>Agent: Agent(config)
+  App->>Loop: AgentLoop(agent, config)
+  Loop->>LLM: LLMProvider(config)
+
+  Note over App,Memory: 2. 初始化记忆系统
+  App->>Memory: BIEMContextPlugin(config)
+  Memory->>Memory: initialize()
+  Memory->>Memory: connect L1, L2, L3
+
+  Note over App,Memory: 3. 配置 LLM Callbacks
+  App->>Memory: _setup_memory_llm_callbacks(memory, llm)
+  Note right of Memory: 设置 consolidation_callback<br/>使用 memory_consolidation.md
+
+  Note over App,Knowledge: 4. 初始化知识系统
+  App->>Knowledge: KnowledgeLearningPlugin(config)
+  Knowledge->>Knowledge: initialize(llm, encoder)
+```
 
 ### 集成数据流
 
@@ -435,60 +614,92 @@ style L3_D fill:#96ceb4
 graph TB
 subgraph "Agent Loop"
   INPUT[用户输入] --> PREPARE
-  subgraph "Memory Integration"
+  subgraph "Context 准备 (LLM 调用前)"
     PREPARE[prepare_context] --> RECALL
-    RECALL[recall memories] --> FORMAT
+    RECALL[recall: 两阶段召回] --> FORMAT
     FORMAT[格式化记忆] --> INJECT
+    KRECALL[知识召回] --> INJECT
   end
-  INJECT --> SYSTEM[System Prompt]
-  SYSTEM --> LLM_CALL[LLM 调用]
+  INJECT --> CONTEXT[set_memory_context]
+  CONTEXT --> BUILD[build_messages]
+  BUILD --> LLM_CALL[LLM 调用]
   LLM_CALL --> RESPONSE[响应生成]
-  RESPONSE --> RECORD_U[记录用户消息]
-  RECORD_U --> RECORD_A[记录助手消息]
-end
-subgraph "Context Window"
-  SYSTEM
-  USER_MSG[User Message]
-  HISTORY[对话历史]
+  subgraph "记录阶段 (LLM 调用后)"
+    RESPONSE --> CLEAR[clear_memory_context]
+    CLEAR --> RECORD_U[record_user_message → ingest]
+    RECORD_U --> RECORD_A[record_assistant_message → ingest]
+    RECORD_A --> KEXTRACT[知识抽取 → process_message]
+  end
 end
 ```
 
 ### 集成代码流程
 
 ```python
-# main.py 中的集成逻辑
-async def run_interactive(agent, loop, memory, knowledge):
-  while True:
-    user_input = get_user_input()
+# web/app.py 中的集成逻辑 (lifespan 初始化)
+async def lifespan(app: FastAPI):
+    # 1. 初始化 Agent 和 Loop
+    _agent = Agent(agent_config)
+    _loop = AgentLoop(_agent, loop_config)
+
+    # 2. 初始化记忆系统
+    _memory_plugin = BIEMContextPlugin(config)
+    await _memory_plugin.initialize()
+    _memory = _memory_plugin.memory
+
+    # 3. 配置 LLM Callbacks (关键!)
+    _setup_memory_llm_callbacks(_memory, _loop.llm)
+
+    # 4. 初始化知识系统
+    _knowledge_plugin = KnowledgeLearningPlugin(knowledge_config)
+    await _knowledge_plugin.initialize(_loop.llm, _memory._encoder)
+
+# _setup_memory_llm_callbacks 实现
+def _setup_memory_llm_callbacks(memory: MemoryManager, llm: LLMProvider):
+    consolidation_prompt = _load_prompt("memory_consolidation")
+
+    async def consolidate_memories(contents: list[str]) -> str:
+        memories_text = "\n".join(f"- {c}" for c in contents)
+        prompt = consolidation_prompt.format(memories=memories_text)
+        response = await llm.complete([{"role": "user", "content": prompt}])
+        return response.content.strip()
+
+    memory.set_consolidation_callback(consolidate_memories)
+
+# Chat API 中的流程
+@app.post("/api/chat")
+async def chat(request: ChatRequest):
     context_parts = []
-    # 1. 召回相关记忆
-    if memory:
-      memory_context = await memory.prepare_context(user_input)
-      if memory_context:
-        context_parts.append(memory_context)
-    # 2. 召回相关知识
-    if knowledge and knowledge.is_available():
-      knowledge_context = await knowledge.get_context_for_query(user_input)
-      if knowledge_context:
-        context_parts.append(knowledge_context)
+
+    # 1. 召回相关记忆 (Per-User)
+    if _memory_plugin:
+        memory_context = await _memory_plugin.prepare_context(request.message)
+        if memory_context:
+            context_parts.append(memory_context)
+
+    # 2. 召回相关知识 (Global)
+    if _knowledge_plugin and _knowledge_plugin.is_available():
+        knowledge_context = await _knowledge_plugin.get_context_for_query(request.message)
+        if knowledge_context:
+            context_parts.append(knowledge_context)
+
     # 3. 注入到 Context
     if context_parts:
-      agent.context.set_memory_context("\n\n".join(context_parts))
+        _agent.context.set_memory_context("\n\n".join(context_parts))
+
     # 4. LLM 调用
-    response = await loop.run_stream(user_input)
+    result = await _loop.run(request.message)
+
     # 5. 清除记忆上下文
-    agent.context.clear_memory_context()
-    # 6. 记录本轮对话
-    if memory:
-      await memory.record_user_message(user_input)
-      await memory.record_assistant_message(response)
-    # 7. 知识抽取
-    if knowledge:
-      result = await knowledge.process_message(user_input)
-      if result.has_pending_confirmation():
-        # 显示确认提示
-        for prompt in result.confirmation_prompts:
-          print(prompt)
+    _agent.context.clear_memory_context()
+
+    # 6. 记录本轮对话 (触发 ingest → 存储到 L1/L2/L3)
+    if _memory_plugin:
+        await _memory_plugin.record_turn(request.message, result)
+
+    # 7. 知识抽取 (触发 LLM 抽取 → 存储到 Knowledge DB)
+    if _knowledge_plugin:
+        await _knowledge_plugin.process_message(request.message)
 ```
 
 ### Context 构建过程
@@ -497,51 +708,64 @@ Agent 的 context 通过 `ContextManager.build_messages()` 方法逐步构建：
 
 ```mermaid
 sequenceDiagram
-  participant Agent as Agent
+  participant Chat as Chat API
+  participant Plugin as BIEMContextPlugin
+  participant MM as MemoryManager
+  participant KPlugin as KnowledgeLearningPlugin
   participant CM as ContextManager
   participant LLM as LLM API
-  Note over Agent,CM: 1. 初始化阶段
-  Agent->>CM: set_system_prompt(template)
-  Note right of CM: 渲染模板:<br/>workspace, tools
-  Note over Agent,CM: 2. 用户输入阶段
-  Agent->>CM: set_memory_context(memories + knowledge)
-  Note right of CM: 注入召回的记忆和知识
-  Note over Agent,CM: 3. 构建消息阶段
-  Agent->>CM: build_messages()
-  CM->>CM: 1. 添加 system_prompt
-  CM->>CM: 2. 添加 memory_context
-  CM->>CM: 3. 添加 skills_summary
-  CM->>CM: 4. 添加 loaded_instructions
-  CM->>CM: 5. 添加 conversation history
-  CM-->>Agent: messages[]
-  Agent->>LLM: chat(messages)
-  Note over Agent,CM: 4. 清理阶段
-  Agent->>CM: clear_memory_context()
+
+  Note over Chat,MM: 1. 记忆召回
+  Chat->>Plugin: prepare_context(user_input)
+  Plugin->>MM: recall(query, top_k=5)
+  MM-->>Plugin: [MemoryNode, ...]
+  Plugin-->>Chat: "## Relevant Memories\n..."
+
+  Note over Chat,KPlugin: 2. 知识召回
+  Chat->>KPlugin: get_context_for_query(user_input)
+  KPlugin-->>Chat: "## Learned Knowledge\n..."
+
+  Note over Chat,CM: 3. 注入 Context
+  Chat->>CM: set_memory_context(memories + knowledge)
+
+  Note over Chat,LLM: 4. 构建消息并调用 LLM
+  Chat->>CM: build_messages()
+  CM->>CM: system_prompt + memory_context + skills
+  CM-->>Chat: messages[]
+  Chat->>LLM: chat(messages)
+  LLM-->>Chat: response
+
+  Note over Chat,MM: 5. 记录对话 (写入存储)
+  Chat->>CM: clear_memory_context()
+  Chat->>Plugin: record_turn(user_msg, response)
+  Plugin->>MM: ingest(user_msg)
+  Plugin->>MM: ingest(response)
+  Note right of MM: 触发 L1/L2/L3 写入
 ```
 
 ### build_messages() 实现逻辑
 
 ```python
 def build_messages(self) -> list[dict]:
-  """Section order (fixed for agent stability):
-  1. System prompt (core instructions, workspace, tools)
-  2. Memory context (relevant memories + knowledge)
-  3. Skills summary (available skills list)
-  4. Loaded skill instructions
-  """
-  system_content = self._system_prompt
-  if self._memory_context:
-    system_content += f"\n\n{self._memory_context}"
-  skill_summary = self.get_skill_summary()
-  if skill_summary:
-    system_content += f"\n\n{skill_summary}"
-  skill_instructions = self.get_loaded_skill_instructions()
-  if skill_instructions:
-    system_content += f"\n\n{skill_instructions}"
-  messages = [{"role": "system", "content": system_content}]
-  for msg in self._messages:
-    messages.append(msg.to_openai_format())
-  return messages
+    """Section order (fixed for agent stability):
+    1. System prompt (core instructions, workspace, tools)
+    2. Memory context (relevant memories + knowledge)
+    3. Skills summary (available skills list)
+    4. Loaded skill instructions
+    """
+    system_content = self._system_prompt
+    if self._memory_context:
+        system_content += f"\n\n{self._memory_context}"
+    skill_summary = self.get_skill_summary()
+    if skill_summary:
+        system_content += f"\n\n{skill_summary}"
+    skill_instructions = self.get_loaded_skill_instructions()
+    if skill_instructions:
+        system_content += f"\n\n{skill_instructions}"
+    messages = [{"role": "system", "content": system_content}]
+    for msg in self._messages:
+        messages.append(msg.to_openai_format())
+    return messages
 ```
 
 ### 最终 Context 结构
@@ -555,10 +779,14 @@ def build_messages(self) -> list[dict]:
 │ - Workspace & Tools                    │
 ├────────────────────────────────────────┤
 │ 2. Memory Context (动态注入)           │
-│ ## Relevant Memories                   │
-│ 1. [● E=0.85] ...                      │
-│ ## Learned Knowledge                   │
+│ ## Relevant Memories (👤 Per-User)     │
+│ 1. [● E=0.85] 用户喜欢黑色幽默...       │
+│    Entities: 黑色幽默, 盖里奇           │
+│ 2. [○ E=0.62] 盖里奇是英国导演...       │
+│                                        │
+│ ## Learned Knowledge (🌐 Global)       │
 │ - (GPT-4, context_window, 128k)        │
+│ - (Python, created_by, Guido)          │
 ├────────────────────────────────────────┤
 │ 3. Skills Summary (动态)              │
 │ - [○] book-flight                     │
@@ -607,16 +835,6 @@ subgraph "Score Fusion"
 end
 ```
 
-### 召回配置参数
-
-```python
-@dataclass
-class MemoryConfig:
-  default_recall_limit: int = 10          # 默认返回数量
-  spreading_activation_hops: int = 2       # 传播跳数
-  spreading_decay_factor: float = 0.5     # 每跳衰减系数
-```
-
 ### 召回内容格式
 
 ```markdown
@@ -643,9 +861,9 @@ Entities: PyTorch, TensorFlow, 框架
 ```mermaid
 graph LR
 subgraph "Energy Dynamics"
-  DECAY[时间衰减<br/>E = E₀ × e^(-λΔt)]
-  BOOST[访问增强<br/>E += 0.1]
-  FEEDBACK[反馈调节<br/>E += feedback × 0.1]
+  DECAY["时间衰减\nE = E₀ × e^(-λΔt)"]
+  BOOST["访问增强\nE += 0.1"]
+  FEEDBACK["反馈调节\nE += feedback × 0.1"]
 end
 TIME[时间流逝] --> DECAY
 ACCESS[被召回/访问] --> BOOST
@@ -926,13 +1144,13 @@ async def search_with_cluster_expansion(
 ) -> list[tuple[str, float]]:
     # 1. 初始向量检索
     initial_results = vector_search(query, top_k)
-    
+
     # 2. 对每个初始结果进行扩展搜索
     for result in initial_results:
         cluster_results = vector_search(result.vector, expansion_k)
         # 扩展结果权重降低 (× 0.7)
         merge_with_lower_weight(cluster_results)
-    
+
     # 3. 去重并按综合分数排序
     return deduplicate_and_sort()
 ```
@@ -956,7 +1174,7 @@ CREATE TABLE knowledge_triples (
   session_id VARCHAR(64) DEFAULT '',
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
-  
+
   -- 全局唯一约束 (不按用户隔离)
   UNIQUE(subject, predicate)
 );
@@ -1106,10 +1324,13 @@ USER_ID=default                     # 初始用户 ID (记忆隔离用)
 ```bash
 # 启动 Milvus (Docker)
 docker compose -f docker-compose.milvus.yml up -d
+
 # 启动 PostgreSQL (如果使用本地)
 brew services start postgresql@18
+
 # 创建数据库
 psql -U your_user -c "CREATE DATABASE biem;"
+
 # 运行 Agent
 uv run python main.py
 ```
